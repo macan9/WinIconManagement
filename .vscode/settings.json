@@ -5,5 +5,15 @@
     "-DCMAKE_MAKE_PROGRAM=D:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
   ],
   "cmake.buildDirectory": "${workspaceFolder}/build",
-  "debug.defaultLaunchConfiguration": "Debug WinIconManagement"
+  "debug.defaultLaunchConfiguration": {
+    "name": "Debug WinIconManagement",
+    "type": "cppvsdbg",
+    "request": "launch",
+    "program": "${workspaceFolder}/build/WinIconManagement.exe",
+    "args": [],
+    "stopAtEntry": false,
+    "cwd": "${workspaceFolder}",
+    "environment": [],
+    "console": "internalConsole"
+  }
 }
