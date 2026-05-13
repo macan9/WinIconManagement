@@ -46,11 +46,15 @@ std::wstring PointToString(const POINT& point) {
 struct DisplayDiagnostics {
     int monitorCount = 0;
     RECT virtualDesktopRect{0, 0, 0, 0};
+    RECT primaryMonitorRect{0, 0, 0, 0};
+    bool hasPrimaryMonitor = false;
     std::wstring monitorDetails;
 };
 
 struct MonitorEnumContext {
     int index = 0;
+    RECT primaryMonitorRect{0, 0, 0, 0};
+    bool hasPrimaryMonitor = false;
     std::wstring lines;
 };
 
@@ -74,6 +78,11 @@ BOOL CALLBACK EnumDisplayMonitorCallback(HMONITOR monitor, HDC, LPRECT, LPARAM p
     context->lines += L", primary=";
     context->lines += (info.dwFlags & MONITORINFOF_PRIMARY) ? L"true" : L"false";
     context->lines += L"\r\n";
+
+    if ((info.dwFlags & MONITORINFOF_PRIMARY) != 0) {
+        context->primaryMonitorRect = info.rcMonitor;
+        context->hasPrimaryMonitor = true;
+    }
     return TRUE;
 }
 
@@ -90,6 +99,8 @@ DisplayDiagnostics CollectDisplayDiagnostics() {
     MonitorEnumContext context{};
     EnumDisplayMonitors(nullptr, nullptr, EnumDisplayMonitorCallback, reinterpret_cast<LPARAM>(&context));
     diagnostics.monitorDetails = context.lines;
+    diagnostics.primaryMonitorRect = context.primaryMonitorRect;
+    diagnostics.hasPrimaryMonitor = context.hasPrimaryMonitor;
     return diagnostics;
 }
 
@@ -310,7 +321,8 @@ bool AppController::Initialize() {
     if (!InitializeTray()) {
         return false;
     }
-    if (!overlayWindow_.Initialize(instance_, mainWindow_)) {
+    // Overlay runs as an independent top-level window and should not be owned by main window.
+    if (!overlayWindow_.Initialize(instance_, nullptr)) {
         Infrastructure::Logger::Get().Error(L"[Overlay] initialization failed.");
     } else {
         UpdateOverlayWindow();
@@ -579,21 +591,37 @@ void AppController::UpdateOverlayWindow() {
         return;
     }
 
+    if (desktopResolveResult_.workerWindow != nullptr && IsWindow(desktopResolveResult_.workerWindow)) {
+        overlayWindow_.SetDesktopHostWindow(desktopResolveResult_.workerWindow);
+    } else if (desktopResolveResult_.progmanWindow != nullptr && IsWindow(desktopResolveResult_.progmanWindow)) {
+        overlayWindow_.SetDesktopHostWindow(desktopResolveResult_.progmanWindow);
+    } else {
+        overlayWindow_.SetDesktopHostWindow(nullptr);
+    }
+
     const DisplayDiagnostics display = CollectDisplayDiagnostics();
     overlayWindow_.SetVirtualDesktopRect(display.virtualDesktopRect);
 
+    const RECT layoutBaseRect = display.hasPrimaryMonitor
+                                    ? display.primaryMonitorRect
+                                    : display.virtualDesktopRect;
     RECT fenceRect{};
-    const int width = display.virtualDesktopRect.right - display.virtualDesktopRect.left;
-    const int height = display.virtualDesktopRect.bottom - display.virtualDesktopRect.top;
+    const int width = layoutBaseRect.right - layoutBaseRect.left;
+    const int height = layoutBaseRect.bottom - layoutBaseRect.top;
     const int fenceWidth = std::max(280, width / 4);
     const int fenceHeight = std::max(180, height / 4);
-    fenceRect.left = display.virtualDesktopRect.left + std::max(48, width / 8);
-    fenceRect.top = display.virtualDesktopRect.top + std::max(48, height / 8);
+    fenceRect.left = layoutBaseRect.left + std::max(48, width / 8);
+    fenceRect.top = layoutBaseRect.top + std::max(48, height / 8);
     fenceRect.right = fenceRect.left + fenceWidth;
     fenceRect.bottom = fenceRect.top + fenceHeight;
 
     overlayWindow_.SetFenceRect(fenceRect);
     overlayWindow_.SetFixedMode(!isPaused_);
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] UpdateOverlayWindow base=" +
+        std::wstring(display.hasPrimaryMonitor ? L"primary" : L"virtual") +
+        L"; baseRect=" + RectToString(layoutBaseRect) +
+        L"; fenceRect=" + RectToString(fenceRect));
 }
 
 LRESULT CALLBACK AppController::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -676,7 +704,6 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
             return 0;
         case WM_CLOSE:
             if (!isExiting_) {
-                overlayWindow_.Hide();
                 ShowWindow(hwnd, SW_HIDE);
                 Infrastructure::Logger::Get().Info(L"Main window hidden to tray.");
                 return 0;
@@ -817,6 +844,7 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
 
     if (isDesktopConnected_) {
         RefreshDesktopIconSnapshot();
+        UpdateOverlayWindow();
         if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
             InvalidateRect(mainWindow_, nullptr, TRUE);
         }
@@ -844,6 +872,7 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
     if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
         InvalidateRect(mainWindow_, nullptr, TRUE);
     }
+    UpdateOverlayWindow();
     UpdateDiagnosticsTextControl();
 }
 

@@ -22,6 +22,7 @@ public:
     void SetFixedMode(bool fixedMode);
     void SetFenceRect(const RECT& fenceRect);
     void SetVirtualDesktopRect(const RECT& virtualDesktopRect);
+    void SetDesktopHostWindow(HWND desktopHostWindow);
 
 private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -32,15 +33,17 @@ private:
     void ApplyRoundedRegion();
     void ApplyClickThroughStyle();
     void NormalizeFenceRect();
+    void EnsureDesktopLayerZOrder() const;
     void Paint(HWND hwnd);
 
     HINSTANCE instance_;
     HWND ownerWindow_;
     HWND window_;
+    HWND desktopHostWindow_;
     RECT virtualDesktopRect_;
     RECT fenceRect_;
     bool fixedMode_;
     bool visible_;
+    bool paintLogged_;
 };
 }  // namespace Overlay
-

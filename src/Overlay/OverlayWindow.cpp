@@ -19,10 +19,12 @@ OverlayWindow::OverlayWindow()
     : instance_(nullptr),
       ownerWindow_(nullptr),
       window_(nullptr),
+      desktopHostWindow_(nullptr),
       virtualDesktopRect_{0, 0, 0, 0},
       fenceRect_{120, 120, 560, 360},
       fixedMode_(true),
-      visible_(false) {}
+      visible_(false),
+      paintLogged_(false) {}
 
 OverlayWindow::~OverlayWindow() {
     Destroy();
@@ -44,15 +46,18 @@ bool OverlayWindow::Initialize(HINSTANCE instance, HWND ownerWindow) {
 
     ApplyClickThroughStyle();
     ApplyRoundedRegion();
+    Infrastructure::Logger::Get().Info(L"[Overlay] Initialize success.");
     return true;
 }
 
 void OverlayWindow::Destroy() {
     if (window_ != nullptr && IsWindow(window_)) {
+        Infrastructure::Logger::Get().Info(L"[Overlay] Destroy window.");
         DestroyWindow(window_);
         window_ = nullptr;
     }
     visible_ = false;
+    paintLogged_ = false;
 }
 
 bool OverlayWindow::IsInitialized() const {
@@ -67,9 +72,11 @@ void OverlayWindow::Show() {
     if (!IsInitialized()) {
         return;
     }
+    EnsureDesktopLayerZOrder();
     ShowWindow(window_, SW_SHOWNOACTIVATE);
     UpdateWindow(window_);
     visible_ = true;
+    Infrastructure::Logger::Get().Info(L"[Overlay] Show.");
 }
 
 void OverlayWindow::Hide() {
@@ -78,13 +85,17 @@ void OverlayWindow::Hide() {
     }
     ShowWindow(window_, SW_HIDE);
     visible_ = false;
+    Infrastructure::Logger::Get().Info(L"[Overlay] Hide.");
 }
 
 void OverlayWindow::SetFixedMode(bool fixedMode) {
     fixedMode_ = fixedMode;
     if (IsInitialized()) {
         ApplyClickThroughStyle();
+        InvalidateRect(window_, nullptr, TRUE);
     }
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] SetFixedMode: " + std::wstring(fixedMode_ ? L"fixed" : L"edit"));
 }
 
 void OverlayWindow::SetFenceRect(const RECT& fenceRect) {
@@ -94,6 +105,11 @@ void OverlayWindow::SetFenceRect(const RECT& fenceRect) {
         ApplyRoundedRegion();
         InvalidateRect(window_, nullptr, TRUE);
     }
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] SetFenceRect: left=" + std::to_wstring(fenceRect_.left) +
+        L", top=" + std::to_wstring(fenceRect_.top) +
+        L", right=" + std::to_wstring(fenceRect_.right) +
+        L", bottom=" + std::to_wstring(fenceRect_.bottom));
 }
 
 void OverlayWindow::SetVirtualDesktopRect(const RECT& virtualDesktopRect) {
@@ -111,9 +127,25 @@ void OverlayWindow::SetVirtualDesktopRect(const RECT& virtualDesktopRect) {
         virtualDesktopRect_.top,
         width,
         height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+    EnsureDesktopLayerZOrder();
     ApplyRoundedRegion();
     InvalidateRect(window_, nullptr, TRUE);
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] SetVirtualDesktopRect: left=" + std::to_wstring(virtualDesktopRect_.left) +
+        L", top=" + std::to_wstring(virtualDesktopRect_.top) +
+        L", right=" + std::to_wstring(virtualDesktopRect_.right) +
+        L", bottom=" + std::to_wstring(virtualDesktopRect_.bottom));
+}
+
+void OverlayWindow::SetDesktopHostWindow(HWND desktopHostWindow) {
+    desktopHostWindow_ = desktopHostWindow;
+    if (IsInitialized()) {
+        EnsureDesktopLayerZOrder();
+    }
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] SetDesktopHostWindow: 0x" +
+        std::to_wstring(reinterpret_cast<uintptr_t>(desktopHostWindow_)));
 }
 
 LRESULT CALLBACK OverlayWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -143,6 +175,12 @@ LRESULT OverlayWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
             return 1;
         case WM_PAINT:
             Paint(hwnd);
+            return 0;
+        case WM_NCDESTROY:
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            if (window_ == hwnd) {
+                window_ = nullptr;
+            }
             return 0;
         case WM_DISPLAYCHANGE:
             if (!IsRectEmpty(&virtualDesktopRect_)) {
@@ -204,7 +242,17 @@ bool OverlayWindow::CreateOverlayWindow() {
         return false;
     }
 
-    SetLayeredWindowAttributes(window_, RGB(0, 0, 0), 255, LWA_ALPHA);
+    const BYTE alpha = static_cast<BYTE>(fixedMode_ ? kFenceFillAlpha : (kFenceFillAlpha + 20));
+    if (!SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA)) {
+        Infrastructure::Logger::Get().Error(
+            L"[Overlay] SetLayeredWindowAttributes failed. error=" + std::to_wstring(GetLastError()));
+    }
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] CreateWindowExW success. hwnd=0x" +
+        std::to_wstring(reinterpret_cast<uintptr_t>(window_)) +
+        L"; width=" + std::to_wstring(width) +
+        L"; height=" + std::to_wstring(height));
+    EnsureDesktopLayerZOrder();
     return true;
 }
 
@@ -226,9 +274,19 @@ void OverlayWindow::ApplyRoundedRegion() {
         kFenceCornerRadiusPixels * 2,
         kFenceCornerRadiusPixels * 2);
     if (region == nullptr) {
+        Infrastructure::Logger::Get().Error(L"[Overlay] CreateRoundRectRgn failed.");
         return;
     }
-    SetWindowRgn(window_, region, TRUE);
+    if (SetWindowRgn(window_, region, TRUE) == 0) {
+        DeleteObject(region);
+        Infrastructure::Logger::Get().Error(
+            L"[Overlay] SetWindowRgn failed. error=" + std::to_wstring(GetLastError()));
+        return;
+    }
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] ApplyRoundedRegion: offset=(" + std::to_wstring(offsetX) + L"," +
+        std::to_wstring(offsetY) + L"), size=" + std::to_wstring(width) +
+        L"x" + std::to_wstring(height));
 }
 
 void OverlayWindow::ApplyClickThroughStyle() {
@@ -252,6 +310,9 @@ void OverlayWindow::ApplyClickThroughStyle() {
         0,
         0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    EnsureDesktopLayerZOrder();
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] ApplyClickThroughStyle: exStyle=" + std::to_wstring(static_cast<unsigned long long>(extendedStyle)));
 }
 
 void OverlayWindow::NormalizeFenceRect() {
@@ -281,12 +342,34 @@ void OverlayWindow::NormalizeFenceRect() {
     }
 }
 
+void OverlayWindow::EnsureDesktopLayerZOrder() const {
+    if (!IsInitialized()) {
+        return;
+    }
+    // Keep overlay in desktop layer: above wallpaper but not above normal app windows.
+    HWND insertAfter = HWND_BOTTOM;
+    if (desktopHostWindow_ != nullptr && IsWindow(desktopHostWindow_)) {
+        insertAfter = desktopHostWindow_;
+    } else if (ownerWindow_ != nullptr && IsWindow(ownerWindow_)) {
+        insertAfter = ownerWindow_;
+    }
+    SetWindowPos(
+        window_,
+        insertAfter,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
+}
+
 void OverlayWindow::Paint(HWND hwnd) {
     PAINTSTRUCT paint{};
     HDC hdc = BeginPaint(hwnd, &paint);
 
     RECT clientRect{};
     GetClientRect(hwnd, &clientRect);
+    // Keep background transparent; we only draw fence region.
     HBRUSH clearBrush = CreateSolidBrush(RGB(0, 0, 0));
     FillRect(hdc, &clientRect, clearBrush);
     DeleteObject(clearBrush);
@@ -331,5 +414,14 @@ void OverlayWindow::Paint(HWND hwnd) {
 
     const BYTE alpha = static_cast<BYTE>(fixedMode_ ? kFenceFillAlpha : (kFenceFillAlpha + 20));
     SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA);
+
+    if (!paintLogged_) {
+        paintLogged_ = true;
+        Infrastructure::Logger::Get().Info(
+            L"[Overlay] WM_PAINT first frame. clientSize=" +
+            std::to_wstring(clientRect.right - clientRect.left) + L"x" +
+            std::to_wstring(clientRect.bottom - clientRect.top) +
+            L"; alpha=" + std::to_wstring(alpha));
+    }
 }
 }  // namespace Overlay

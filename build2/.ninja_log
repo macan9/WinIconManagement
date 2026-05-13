@@ -17,3 +17,12 @@
 32	2282	8003685232968289	CMakeFiles/WinIconManagement.dir/src/App/AppController.cpp.obj	6ce461a505c83da0
 53	2332	8003685233178293	CMakeFiles/WinIconManagement.dir/src/Infrastructure/Paths.cpp.obj	1ff3e45ce68d3de7
 2333	2795	8003685255975865	WinIconManagement.exe	7ca5acc10f04b2ab
+21	1300	8003691078668264	CMakeFiles/WinIconManagement.dir/src/Overlay/OverlayWindow.cpp.obj	f3ef06420a91e2c4
+1302	1564	8003691091471125	WinIconManagement.exe	7ca5acc10f04b2ab
+25	1371	8003692827720644	CMakeFiles/WinIconManagement.dir/src/App/AppController.cpp.obj	6ce461a505c83da0
+20	210	8003692954013719	WinIconManagement.exe	7ca5acc10f04b2ab
+19	1280	8003697603026537	CMakeFiles/WinIconManagement.dir/src/Overlay/OverlayWindow.cpp.obj	f3ef06420a91e2c4
+16	1374	8003697602986520	CMakeFiles/WinIconManagement.dir/src/App/AppController.cpp.obj	6ce461a505c83da0
+1376	1596	8003697616588159	WinIconManagement.exe	7ca5acc10f04b2ab
+18	1343	8003698364571815	CMakeFiles/WinIconManagement.dir/src/App/AppController.cpp.obj	6ce461a505c83da0
+1344	1544	8003698377828064	WinIconManagement.exe	7ca5acc10f04b2ab
