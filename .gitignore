@@ -6,3 +6,4 @@ dist/
 *.VC.db
 *.VC.opendb
 .vs/
+.vscode/
