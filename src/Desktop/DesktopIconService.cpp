@@ -11,6 +11,8 @@
 namespace {
 constexpr DWORD kListViewSendTimeoutMs = 1000;
 constexpr SIZE_T kIconTextMaxChars = 512;
+constexpr int kMinDesktopCoordinate = -32768;
+constexpr int kMaxDesktopCoordinate = 32767;
 
 bool SendListViewMessage(
     HWND listViewWindow,
@@ -103,6 +105,10 @@ private:
     void* remoteAddress_;
 };
 
+[[nodiscard]] bool IsCoordinateInRange(int value) {
+    return value >= kMinDesktopCoordinate && value <= kMaxDesktopCoordinate;
+}
+
 [[nodiscard]] std::wstring ExtractRemoteString(const std::vector<wchar_t>& buffer, DWORD_PTR charsWritten) {
     if (buffer.empty()) {
         return L"";
@@ -188,6 +194,33 @@ bool ReadDesktopIconName(
     *outName = ExtractRemoteString(textBuffer, charsWritten);
     return true;
 }
+
+bool SetDesktopIconPositionCore(
+    HWND listViewWindow,
+    int iconIndex,
+    POINT targetPosition,
+    const RemoteBuffer& remotePointBuffer) {
+    if (listViewWindow == nullptr || !IsWindow(listViewWindow) || iconIndex < 0) {
+        return false;
+    }
+    if (!IsCoordinateInRange(targetPosition.x) || !IsCoordinateInRange(targetPosition.y)) {
+        return false;
+    }
+    if (!remotePointBuffer.IsValid() || remotePointBuffer.Size() < sizeof(POINT)) {
+        return false;
+    }
+    if (!remotePointBuffer.WriteObject(targetPosition)) {
+        return false;
+    }
+
+    DWORD_PTR ignoredResult = 0;
+    return SendListViewMessage(
+        listViewWindow,
+        LVM_SETITEMPOSITION32,
+        static_cast<WPARAM>(iconIndex),
+        reinterpret_cast<LPARAM>(remotePointBuffer.Get()),
+        &ignoredResult);
+}
 }  // namespace
 
 namespace Desktop {
@@ -247,5 +280,109 @@ std::vector<DesktopIcon> DesktopIconService::EnumerateDesktopIcons(
         icons.push_back(std::move(icon));
     }
     return icons;
+}
+
+bool DesktopIconService::CanAccessExplorerProcess(DWORD explorerProcessId) const {
+    if (explorerProcessId == 0) {
+        return false;
+    }
+
+    Infrastructure::UniqueKernelHandle explorerProcess(OpenProcess(
+        PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION,
+        FALSE,
+        explorerProcessId));
+    return explorerProcess.IsValid();
+}
+
+bool DesktopIconService::SetDesktopIconPosition(
+    HWND listViewWindow,
+    DWORD explorerProcessId,
+    int iconIndex,
+    POINT targetPosition) const {
+    if (listViewWindow == nullptr || !IsWindow(listViewWindow) || explorerProcessId == 0 || iconIndex < 0) {
+        return false;
+    }
+    if (!IsCoordinateInRange(targetPosition.x) || !IsCoordinateInRange(targetPosition.y)) {
+        return false;
+    }
+    if (!CanAccessExplorerProcess(explorerProcessId)) {
+        return false;
+    }
+
+    Infrastructure::UniqueKernelHandle explorerProcess(OpenProcess(
+        PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION,
+        FALSE,
+        explorerProcessId));
+    if (!explorerProcess.IsValid()) {
+        return false;
+    }
+
+    RemoteBuffer remotePointBuffer(explorerProcess.Get(), sizeof(POINT));
+    if (!remotePointBuffer.IsValid()) {
+        return false;
+    }
+
+    if (!SetDesktopIconPositionCore(listViewWindow, iconIndex, targetPosition, remotePointBuffer)) {
+        return false;
+    }
+
+    POINT verifyPosition{};
+    if (!ReadDesktopIconPosition(listViewWindow, iconIndex, remotePointBuffer, &verifyPosition)) {
+        return false;
+    }
+
+    RefreshDesktopIcon(listViewWindow, iconIndex);
+    return true;
+}
+
+int DesktopIconService::MoveDesktopIcons(
+    HWND listViewWindow,
+    DWORD explorerProcessId,
+    const std::vector<DesktopIcon>& iconsToMove) const {
+    if (iconsToMove.empty()) {
+        return 0;
+    }
+    if (listViewWindow == nullptr || !IsWindow(listViewWindow) || explorerProcessId == 0) {
+        return 0;
+    }
+    if (!CanAccessExplorerProcess(explorerProcessId)) {
+        return 0;
+    }
+
+    Infrastructure::UniqueKernelHandle explorerProcess(OpenProcess(
+        PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION,
+        FALSE,
+        explorerProcessId));
+    if (!explorerProcess.IsValid()) {
+        return 0;
+    }
+
+    RemoteBuffer remotePointBuffer(explorerProcess.Get(), sizeof(POINT));
+    if (!remotePointBuffer.IsValid()) {
+        return 0;
+    }
+
+    int successCount = 0;
+    for (const DesktopIcon& icon : iconsToMove) {
+        if (SetDesktopIconPositionCore(listViewWindow, icon.index, icon.position, remotePointBuffer)) {
+            RefreshDesktopIcon(listViewWindow, icon.index);
+            ++successCount;
+        }
+    }
+    return successCount;
+}
+
+bool DesktopIconService::RefreshDesktopIcon(HWND listViewWindow, int iconIndex) const {
+    if (listViewWindow == nullptr || !IsWindow(listViewWindow) || iconIndex < 0) {
+        return false;
+    }
+
+    DWORD_PTR messageResult = 0;
+    return SendListViewMessage(
+        listViewWindow,
+        LVM_UPDATE,
+        static_cast<WPARAM>(iconIndex),
+        0,
+        &messageResult);
 }
 }  // namespace Desktop

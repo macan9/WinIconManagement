@@ -35,6 +35,11 @@ private:
     std::wstring BuildDesktopResolveStatusText() const;
     void ResolveDesktopWindows(bool fromManualReconnect);
     void RefreshDesktopIconSnapshot();
+    bool EnsureDesktopConnection();
+    bool EnsureDesktopAndIconsReady();
+    void CacheOriginalIconPositions();
+    bool MoveTestDesktopIcon();
+    bool RestoreOriginalDesktopLayout();
     void UpdateWindowTitle();
 
     HINSTANCE instance_;
@@ -46,6 +51,7 @@ private:
     Desktop::DesktopResolveResult desktopResolveResult_;
     int desktopIconCount_;
     std::vector<Desktop::DesktopIcon> desktopIcons_;
+    std::vector<Desktop::DesktopIcon> originalDesktopIcons_;
     std::wstring desktopIconReadStatus_;
     UINT trayCallbackMessage_;
     UINT taskbarCreatedMessage_;

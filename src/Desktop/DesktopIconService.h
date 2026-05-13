@@ -18,5 +18,16 @@ public:
     [[nodiscard]] std::vector<DesktopIcon> EnumerateDesktopIcons(
         HWND listViewWindow,
         DWORD explorerProcessId) const;
+    [[nodiscard]] bool CanAccessExplorerProcess(DWORD explorerProcessId) const;
+    [[nodiscard]] bool SetDesktopIconPosition(
+        HWND listViewWindow,
+        DWORD explorerProcessId,
+        int iconIndex,
+        POINT targetPosition) const;
+    [[nodiscard]] int MoveDesktopIcons(
+        HWND listViewWindow,
+        DWORD explorerProcessId,
+        const std::vector<DesktopIcon>& iconsToMove) const;
+    [[nodiscard]] bool RefreshDesktopIcon(HWND listViewWindow, int iconIndex) const;
 };
 }  // namespace Desktop

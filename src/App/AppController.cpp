@@ -134,6 +134,33 @@ bool AppController::Initialize() {
     return true;
 }
 
+bool AppController::EnsureDesktopConnection() {
+    if (isDesktopConnected_ &&
+        Desktop::DesktopWindowResolver::IsWindowChainValid(desktopResolveResult_)) {
+        return true;
+    }
+
+    ResolveDesktopWindows(false);
+    return isDesktopConnected_ &&
+           Desktop::DesktopWindowResolver::IsWindowChainValid(desktopResolveResult_);
+}
+
+bool AppController::EnsureDesktopAndIconsReady() {
+    if (!EnsureDesktopConnection()) {
+        Infrastructure::Logger::Get().Error(L"[DesktopIcons] desktop connection unavailable.");
+        return false;
+    }
+
+    if (desktopIcons_.empty()) {
+        RefreshDesktopIconSnapshot();
+    }
+    if (desktopIcons_.empty()) {
+        Infrastructure::Logger::Get().Error(L"[DesktopIcons] icon snapshot is empty.");
+        return false;
+    }
+    return true;
+}
+
 int AppController::Run() {
     ShowWindow(mainWindow_, SW_SHOWDEFAULT);
     UpdateWindow(mainWindow_);
@@ -420,9 +447,25 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
             ResolveDesktopWindows(true);
             UpdateWindowTitle();
             break;
+        case IDM_TRAY_TEST_MOVE_ICON:
+            Infrastructure::Logger::Get().Info(L"Tray command: Test move icon.");
+            if (!MoveTestDesktopIcon()) {
+                MessageBoxW(
+                    hwnd,
+                    L"测试移动失败，请查看日志。",
+                    L"WinIconManagement",
+                    MB_OK | MB_ICONWARNING);
+            }
+            break;
         case IDM_TRAY_RESTORE_LAYOUT:
             Infrastructure::Logger::Get().Info(L"Tray command: Restore layout.");
-            MessageBoxW(hwnd, L"Restore layout will be implemented in Stage 09.", L"WinIconManagement", MB_OK | MB_ICONINFORMATION);
+            if (!RestoreOriginalDesktopLayout()) {
+                MessageBoxW(
+                    hwnd,
+                    L"恢复原始布局失败，请先执行一次“测试移动图标”并查看日志。",
+                    L"WinIconManagement",
+                    MB_OK | MB_ICONWARNING);
+            }
             break;
         case IDM_TRAY_EXIT:
             isExiting_ = true;
@@ -538,6 +581,100 @@ void AppController::RefreshDesktopIconSnapshot() {
     LogDesktopIconDiagnostics();
 }
 
+void AppController::CacheOriginalIconPositions() {
+    if (!desktopIcons_.empty()) {
+        originalDesktopIcons_ = desktopIcons_;
+        Infrastructure::Logger::Get().Info(
+            L"[DesktopMove] original icon snapshot cached. count=" + std::to_wstring(originalDesktopIcons_.size()));
+    }
+}
+
+bool AppController::MoveTestDesktopIcon() {
+    if (!EnsureDesktopAndIconsReady()) {
+        desktopIconReadStatus_ = L"测试移动失败: 桌面图标不可用";
+        UpdateDiagnosticsTextControl();
+        return false;
+    }
+
+    CacheOriginalIconPositions();
+    const Desktop::DesktopIcon sourceIcon = desktopIcons_.front();
+
+    const DisplayDiagnostics display = CollectDisplayDiagnostics();
+    POINT targetPosition{};
+    targetPosition.x = display.virtualDesktopRect.left + 80;
+    targetPosition.y = display.virtualDesktopRect.top + 80;
+
+    if (!desktopIconService_.SetDesktopIconPosition(
+            desktopResolveResult_.listViewWindow,
+            desktopResolveResult_.explorerProcessId,
+            sourceIcon.index,
+            targetPosition)) {
+        desktopIconReadStatus_ = L"测试移动失败: SetDesktopIconPosition 返回 false";
+        Infrastructure::Logger::Get().Error(
+            L"[DesktopMove] failed. index=" + std::to_wstring(sourceIcon.index) +
+            L"; from=" + PointToString(sourceIcon.position) +
+            L"; to=" + PointToString(targetPosition));
+        UpdateDiagnosticsTextControl();
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[DesktopMove] success. index=" + std::to_wstring(sourceIcon.index) +
+        L"; from=" + PointToString(sourceIcon.position) +
+        L"; to=" + PointToString(targetPosition));
+
+    RefreshDesktopIconSnapshot();
+    desktopIconReadStatus_ = L"测试移动成功，已移动图标 index=" + std::to_wstring(sourceIcon.index);
+    UpdateDiagnosticsTextControl();
+    return true;
+}
+
+bool AppController::RestoreOriginalDesktopLayout() {
+    if (!EnsureDesktopConnection()) {
+        desktopIconReadStatus_ = L"恢复失败: 桌面连接不可用";
+        UpdateDiagnosticsTextControl();
+        return false;
+    }
+    if (originalDesktopIcons_.empty()) {
+        desktopIconReadStatus_ = L"恢复失败: 没有可恢复的原始快照";
+        Infrastructure::Logger::Get().Error(L"[DesktopMove] restore skipped: no original snapshot.");
+        UpdateDiagnosticsTextControl();
+        return false;
+    }
+
+    // Restore 前先做一次重连，避免 Explorer 在 move 后重启导致旧句柄失效。
+    ResolveDesktopWindows(false);
+    if (!isDesktopConnected_ ||
+        !Desktop::DesktopWindowResolver::IsWindowChainValid(desktopResolveResult_)) {
+        desktopIconReadStatus_ = L"恢复失败: 桌面句柄失效，重连未成功";
+        Infrastructure::Logger::Get().Error(L"[DesktopMove] restore aborted: desktop reconnect failed.");
+        UpdateDiagnosticsTextControl();
+        return false;
+    }
+
+    const int movedCount = desktopIconService_.MoveDesktopIcons(
+        desktopResolveResult_.listViewWindow,
+        desktopResolveResult_.explorerProcessId,
+        originalDesktopIcons_);
+    const int expected = static_cast<int>(originalDesktopIcons_.size());
+
+    Infrastructure::Logger::Get().Info(
+        L"[DesktopMove] restore result. moved=" + std::to_wstring(movedCount) +
+        L"; expected=" + std::to_wstring(expected) +
+        L"; explorerPid=" + std::to_wstring(desktopResolveResult_.explorerProcessId) +
+        L"; listView=" + HandleToString(desktopResolveResult_.listViewWindow));
+
+    RefreshDesktopIconSnapshot();
+    if (movedCount == expected) {
+        desktopIconReadStatus_ = L"恢复完成";
+    } else {
+        desktopIconReadStatus_ = L"恢复部分成功: " +
+                                 std::to_wstring(movedCount) + L"/" + std::to_wstring(expected);
+    }
+    UpdateDiagnosticsTextControl();
+    return movedCount > 0;
+}
+
 void AppController::LogDesktopResolveDiagnostics() const {
     std::wstring summary = L"[DesktopResolve] success=";
     summary += isDesktopConnected_ ? L"true" : L"false";
@@ -614,6 +751,7 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
     text += L"\r\n桌面图标预期数: " + std::to_wstring(desktopIconCount_) + L"\r\n";
     text += L"桌面图标读取数: " + std::to_wstring(desktopIcons_.size()) + L"\r\n";
     text += L"图标读取状态: " + desktopIconReadStatus_ + L"\r\n";
+    text += L"原始快照缓存数: " + std::to_wstring(originalDesktopIcons_.size()) + L"\r\n";
     if (!desktopIcons_.empty()) {
         text += L"图标样例:\r\n";
         const size_t sampleCount = std::min<size_t>(desktopIcons_.size(), 10);
