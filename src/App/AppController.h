@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include "Desktop/DesktopWindowResolver.h"
 #include "Tray/TrayIcon.h"
 
 namespace App {
@@ -20,13 +21,19 @@ private:
     bool RegisterWindowClass();
     bool CreateMainWindow();
     bool InitializeTray();
+    void PaintMainWindow(HWND hwnd);
+    void ResolveDesktopWindows(bool fromManualReconnect);
     void UpdateWindowTitle();
 
     HINSTANCE instance_;
     HWND mainWindow_;
     Tray::TrayIcon trayIcon_;
+    Desktop::DesktopWindowResolver desktopResolver_;
+    Desktop::DesktopResolveResult desktopResolveResult_;
     UINT trayCallbackMessage_;
     UINT taskbarCreatedMessage_;
+    UINT_PTR desktopHealthTimerId_;
+    UINT desktopHealthIntervalMs_;
     bool isPinned_;
     bool isPaused_;
     bool isExiting_;

@@ -8,6 +8,8 @@
 namespace {
 constexpr wchar_t kMainWindowClassName[] = L"WinIconManagement.MainWindow";
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
+constexpr UINT_PTR kDesktopHealthTimerId = 1;
+constexpr UINT kDesktopHealthIntervalMs = 3000;
 }
 
 namespace App {
@@ -17,12 +19,17 @@ AppController::AppController(HINSTANCE instance)
       trayIcon_(),
       trayCallbackMessage_(kTrayCallbackMessage),
       taskbarCreatedMessage_(RegisterWindowMessageW(L"TaskbarCreated")),
+      desktopHealthTimerId_(kDesktopHealthTimerId),
+      desktopHealthIntervalMs_(kDesktopHealthIntervalMs),
       isPinned_(false),
       isPaused_(false),
       isExiting_(false),
       isDesktopConnected_(false) {}
 
 AppController::~AppController() {
+    if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
+        KillTimer(mainWindow_, desktopHealthTimerId_);
+    }
     trayIcon_.Remove();
     if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
         DestroyWindow(mainWindow_);
@@ -40,7 +47,10 @@ bool AppController::Initialize() {
     if (!InitializeTray()) {
         return false;
     }
-    isDesktopConnected_ = true;
+    ResolveDesktopWindows(false);
+    if (SetTimer(mainWindow_, desktopHealthTimerId_, desktopHealthIntervalMs_, nullptr) == 0) {
+        Infrastructure::Logger::Get().Error(L"SetTimer for desktop health monitor failed.");
+    }
     UpdateWindowTitle();
     return true;
 }
@@ -140,12 +150,49 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
         trayIcon_.SetPinned(isPinned_);
         trayIcon_.SetPaused(isPaused_);
         trayIcon_.RecreateAfterExplorerRestart();
+        ResolveDesktopWindows(false);
+        UpdateWindowTitle();
         return 0;
     }
 
     switch (message) {
         case WM_COMMAND:
             HandleCommand(hwnd, LOWORD(wParam));
+            return 0;
+        case WM_TIMER:
+            if (wParam == desktopHealthTimerId_) {
+                if (!Desktop::DesktopWindowResolver::IsWindowChainValid(desktopResolveResult_)) {
+                    Infrastructure::Logger::Get().Info(L"Desktop window handle invalid, reconnecting.");
+                    ResolveDesktopWindows(false);
+                    UpdateWindowTitle();
+                }
+                return 0;
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+        case WM_DISPLAYCHANGE:
+            Infrastructure::Logger::Get().Info(L"Display topology changed, refreshing desktop resolve.");
+            ResolveDesktopWindows(false);
+            UpdateWindowTitle();
+            return 0;
+        case WM_DPICHANGED: {
+            const auto* suggestedRect = reinterpret_cast<RECT*>(lParam);
+            if (suggestedRect != nullptr) {
+                SetWindowPos(
+                    hwnd,
+                    nullptr,
+                    suggestedRect->left,
+                    suggestedRect->top,
+                    suggestedRect->right - suggestedRect->left,
+                    suggestedRect->bottom - suggestedRect->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            Infrastructure::Logger::Get().Info(L"DPI changed, refreshing desktop resolve.");
+            ResolveDesktopWindows(false);
+            UpdateWindowTitle();
+            return 0;
+        }
+        case WM_PAINT:
+            PaintMainWindow(hwnd);
             return 0;
         case kTrayCallbackMessage:
             if (trayIcon_.HandleCallbackMessage(lParam)) {
@@ -161,6 +208,7 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            KillTimer(hwnd, desktopHealthTimerId_);
             trayIcon_.Remove();
             if (isExiting_) {
                 Infrastructure::Logger::Get().Info(L"Application is shutting down from tray command.");
@@ -193,6 +241,11 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
                 isPaused_ ? L"Tray command: Pause enabled." : L"Tray command: Pause disabled.");
             UpdateWindowTitle();
             break;
+        case IDM_TRAY_RECONNECT_DESKTOP:
+            Infrastructure::Logger::Get().Info(L"Tray command: Reconnect desktop.");
+            ResolveDesktopWindows(true);
+            UpdateWindowTitle();
+            break;
         case IDM_TRAY_RESTORE_LAYOUT:
             Infrastructure::Logger::Get().Info(L"Tray command: Restore layout.");
             MessageBoxW(hwnd, L"Restore layout will be implemented in Stage 09.", L"WinIconManagement", MB_OK | MB_ICONINFORMATION);
@@ -215,5 +268,78 @@ void AppController::UpdateWindowTitle() {
     title += L" | ";
     title += isDesktopConnected_ ? L"DesktopConnected" : L"DesktopDisconnected";
     SetWindowTextW(mainWindow_, title.c_str());
+}
+
+void AppController::PaintMainWindow(HWND hwnd) {
+    PAINTSTRUCT paintStruct{};
+    HDC deviceContext = BeginPaint(hwnd, &paintStruct);
+
+    RECT clientRect{};
+    GetClientRect(hwnd, &clientRect);
+    SetBkMode(deviceContext, TRANSPARENT);
+
+    HGDIOBJ previousFont = SelectObject(deviceContext, GetStockObject(DEFAULT_GUI_FONT));
+
+    RECT titleRect{24, 20, clientRect.right - 24, 48};
+    DrawTextW(deviceContext, L"WinIconManagement", -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    RECT labelRect{24, 48, clientRect.right - 24, 72};
+    DrawTextW(deviceContext, L"桌面连接状态", -1, &labelRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    const COLORREF statusColor = isDesktopConnected_ ? RGB(40, 167, 69) : RGB(220, 53, 69);
+    HBRUSH statusBrush = CreateSolidBrush(statusColor);
+    HPEN statusPen = CreatePen(PS_SOLID, 1, statusColor);
+    HGDIOBJ previousBrush = SelectObject(deviceContext, statusBrush);
+    HGDIOBJ previousPen = SelectObject(deviceContext, statusPen);
+    Ellipse(deviceContext, 24, 82, 36, 94);
+    SelectObject(deviceContext, previousPen);
+    SelectObject(deviceContext, previousBrush);
+    DeleteObject(statusPen);
+    DeleteObject(statusBrush);
+
+    const wchar_t* statusText = isDesktopConnected_ ? L"连接桌面成功" : L"桌面连接失败";
+    RECT statusRect{44, 78, clientRect.right - 24, 98};
+    DrawTextW(deviceContext, statusText, -1, &statusRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    if (!isDesktopConnected_ && !desktopResolveResult_.failureStep.empty()) {
+        std::wstring detail = L"失败步骤: " + desktopResolveResult_.failureStep;
+        RECT detailRect{24, 106, clientRect.right - 24, 130};
+        DrawTextW(deviceContext, detail.c_str(), -1, &detailRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+
+    SelectObject(deviceContext, previousFont);
+    EndPaint(hwnd, &paintStruct);
+}
+
+void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
+    desktopResolveResult_ = desktopResolver_.Resolve();
+    isDesktopConnected_ = desktopResolveResult_.success &&
+                          Desktop::DesktopWindowResolver::IsWindowChainValid(desktopResolveResult_);
+
+    if (isDesktopConnected_) {
+        Infrastructure::Logger::Get().Info(
+            L"Desktop resolve success. explorerPid=" + std::to_wstring(desktopResolveResult_.explorerProcessId));
+        if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
+            InvalidateRect(mainWindow_, nullptr, TRUE);
+        }
+        return;
+    }
+
+    std::wstring message = L"Desktop resolve failed at ";
+    message += desktopResolveResult_.failureStep.empty() ? L"<unknown>" : desktopResolveResult_.failureStep;
+    message += L", error=" + std::to_wstring(desktopResolveResult_.failureCode);
+    Infrastructure::Logger::Get().Error(message);
+
+    if (fromManualReconnect) {
+        MessageBoxW(
+            mainWindow_,
+            L"重新连接桌面失败，请查看日志后重试。",
+            L"WinIconManagement",
+            MB_OK | MB_ICONWARNING);
+    }
+
+    if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
+        InvalidateRect(mainWindow_, nullptr, TRUE);
+    }
 }
 }  // namespace App
