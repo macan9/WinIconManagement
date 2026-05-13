@@ -153,6 +153,11 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
             }
             return 0;
         case WM_CLOSE:
+            if (!isExiting_) {
+                ShowWindow(hwnd, SW_HIDE);
+                Infrastructure::Logger::Get().Info(L"Main window hidden to tray.");
+                return 0;
+            }
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
@@ -160,6 +165,7 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
             if (isExiting_) {
                 Infrastructure::Logger::Get().Info(L"Application is shutting down from tray command.");
             }
+            mainWindow_ = nullptr;
             PostQuitMessage(0);
             return 0;
         default:

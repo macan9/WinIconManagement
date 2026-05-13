@@ -10,7 +10,7 @@ BEGIN
     POPUP "TrayMenu"
     BEGIN
         MENUITEM L"主设置",          IDM_TRAY_SETTINGS
-        MENUITEM L"固定/取消固定",   IDM_TRAY_TOGGLE_PIN
+        MENUITEM L"固定",            IDM_TRAY_TOGGLE_PIN
         MENUITEM L"暂停管理",        IDM_TRAY_PAUSE
         MENUITEM L"恢复原始布局",    IDM_TRAY_RESTORE_LAYOUT
         MENUITEM SEPARATOR

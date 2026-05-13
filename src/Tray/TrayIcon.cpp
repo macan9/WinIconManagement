@@ -162,10 +162,13 @@ void TrayIcon::UpdateMenuState() {
         return;
     }
 
-    CheckMenuItem(
+    const wchar_t* pinToggleText = isPinned_ ? L"取消固定" : L"固定";
+    ModifyMenuW(
         popupMenu,
         IDM_TRAY_TOGGLE_PIN,
-        MF_BYCOMMAND | (isPinned_ ? MF_CHECKED : MF_UNCHECKED));
+        MF_BYCOMMAND | MF_STRING,
+        IDM_TRAY_TOGGLE_PIN,
+        pinToggleText);
 
     CheckMenuItem(
         popupMenu,
@@ -187,4 +190,3 @@ HICON TrayIcon::LoadAppIcon() const {
     return LoadIconW(nullptr, IDI_APPLICATION);
 }
 }  // namespace Tray
-
