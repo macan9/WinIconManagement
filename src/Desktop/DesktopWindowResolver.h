@@ -10,12 +10,17 @@ struct DesktopResolveResult {
     bool usedEnumWindowsFallback = false;
     HWND progmanWindow = nullptr;
     HWND workerWindow = nullptr;
+    HWND workerWindowAfterDefView = nullptr;
+    HWND overlayAnchorWindow = nullptr;
     HWND shellDefViewWindow = nullptr;
     HWND listViewWindow = nullptr;
     DWORD explorerProcessId = 0;
     std::wstring resolvePath;
     std::wstring progmanClassName;
     std::wstring workerClassName;
+    std::wstring workerAfterDefViewClassName;
+    std::wstring overlayAnchorClassName;
+    std::wstring overlayAnchorStrategy;
     std::wstring shellDefViewClassName;
     std::wstring listViewClassName;
     std::wstring failureStep;

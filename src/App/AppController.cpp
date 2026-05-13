@@ -591,9 +591,13 @@ void AppController::UpdateOverlayWindow() {
         return;
     }
 
-    if (desktopResolveResult_.workerWindow != nullptr && IsWindow(desktopResolveResult_.workerWindow)) {
+    if (desktopResolveResult_.overlayAnchorWindow != nullptr &&
+        IsWindow(desktopResolveResult_.overlayAnchorWindow)) {
+        overlayWindow_.SetDesktopHostWindow(desktopResolveResult_.overlayAnchorWindow);
+    } else if (desktopResolveResult_.workerWindow != nullptr && IsWindow(desktopResolveResult_.workerWindow)) {
         overlayWindow_.SetDesktopHostWindow(desktopResolveResult_.workerWindow);
-    } else if (desktopResolveResult_.progmanWindow != nullptr && IsWindow(desktopResolveResult_.progmanWindow)) {
+    } else if (desktopResolveResult_.progmanWindow != nullptr &&
+               IsWindow(desktopResolveResult_.progmanWindow)) {
         overlayWindow_.SetDesktopHostWindow(desktopResolveResult_.progmanWindow);
     } else {
         overlayWindow_.SetDesktopHostWindow(nullptr);
@@ -1067,11 +1071,16 @@ void AppController::LogDesktopResolveDiagnostics() const {
     summary += L"; fallback=" + std::wstring(desktopResolveResult_.usedEnumWindowsFallback ? L"true" : L"false");
     summary += L"; progman=" + HandleToString(desktopResolveResult_.progmanWindow);
     summary += L"; worker=" + HandleToString(desktopResolveResult_.workerWindow);
+    summary += L"; workerAfterDefView=" + HandleToString(desktopResolveResult_.workerWindowAfterDefView);
+    summary += L"; overlayAnchor=" + HandleToString(desktopResolveResult_.overlayAnchorWindow);
+    summary += L"; overlayAnchorStrategy=" + desktopResolveResult_.overlayAnchorStrategy;
     summary += L"; defView=" + HandleToString(desktopResolveResult_.shellDefViewWindow);
     summary += L"; listView=" + HandleToString(desktopResolveResult_.listViewWindow);
     summary += L"; explorerPid=" + std::to_wstring(desktopResolveResult_.explorerProcessId);
     summary += L"; progmanClass=" + desktopResolveResult_.progmanClassName;
     summary += L"; workerClass=" + desktopResolveResult_.workerClassName;
+    summary += L"; workerAfterDefViewClass=" + desktopResolveResult_.workerAfterDefViewClassName;
+    summary += L"; overlayAnchorClass=" + desktopResolveResult_.overlayAnchorClassName;
     summary += L"; defViewClass=" + desktopResolveResult_.shellDefViewClassName;
     summary += L"; listViewClass=" + desktopResolveResult_.listViewClassName;
     if (!desktopResolveResult_.failureStep.empty()) {
@@ -1121,6 +1130,11 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
             L" (" + desktopResolveResult_.progmanClassName + L")\r\n";
     text += L"WorkerW: " + HandleToString(desktopResolveResult_.workerWindow) +
             L" (" + desktopResolveResult_.workerClassName + L")\r\n";
+    text += L"WorkerW(AfterDefView): " + HandleToString(desktopResolveResult_.workerWindowAfterDefView) +
+            L" (" + desktopResolveResult_.workerAfterDefViewClassName + L")\r\n";
+    text += L"Overlay Anchor: " + HandleToString(desktopResolveResult_.overlayAnchorWindow) +
+            L" (" + desktopResolveResult_.overlayAnchorClassName + L")\r\n";
+    text += L"Overlay Strategy: " + desktopResolveResult_.overlayAnchorStrategy + L"\r\n";
     text += L"SHELLDLL_DefView: " + HandleToString(desktopResolveResult_.shellDefViewWindow) +
             L" (" + desktopResolveResult_.shellDefViewClassName + L")\r\n";
     text += L"SysListView32: " + HandleToString(desktopResolveResult_.listViewWindow) +

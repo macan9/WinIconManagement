@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <string>
+#include <sstream>
 
 #include "Infrastructure/Logger.h"
 
@@ -143,9 +144,10 @@ void OverlayWindow::SetDesktopHostWindow(HWND desktopHostWindow) {
     if (IsInitialized()) {
         EnsureDesktopLayerZOrder();
     }
-    Infrastructure::Logger::Get().Info(
-        L"[Overlay] SetDesktopHostWindow: 0x" +
-        std::to_wstring(reinterpret_cast<uintptr_t>(desktopHostWindow_)));
+    std::wstringstream stream;
+    stream << L"[Overlay] SetDesktopHostWindow: 0x" << std::hex << std::uppercase
+           << reinterpret_cast<uintptr_t>(desktopHostWindow_);
+    Infrastructure::Logger::Get().Info(stream.str());
 }
 
 LRESULT CALLBACK OverlayWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {

@@ -26,3 +26,10 @@
 1376	1596	8003697616588159	WinIconManagement.exe	7ca5acc10f04b2ab
 18	1343	8003698364571815	CMakeFiles/WinIconManagement.dir/src/App/AppController.cpp.obj	6ce461a505c83da0
 1344	1544	8003698377828064	WinIconManagement.exe	7ca5acc10f04b2ab
+28	512	8003702172699543	CMakeFiles/WinIconManagement.dir/src/Desktop/DesktopWindowResolver.cpp.obj	b7737940c7d70b88
+24	1455	8003702172659606	CMakeFiles/WinIconManagement.dir/src/App/AppController.cpp.obj	6ce461a505c83da0
+1456	1737	8003702186981774	WinIconManagement.exe	7ca5acc10f04b2ab
+18	464	8003703550707268	CMakeFiles/WinIconManagement.dir/src/Desktop/DesktopWindowResolver.cpp.obj	b7737940c7d70b88
+465	661	8003703555188983	WinIconManagement.exe	7ca5acc10f04b2ab
+22	1371	8003703790487993	CMakeFiles/WinIconManagement.dir/src/Overlay/OverlayWindow.cpp.obj	f3ef06420a91e2c4
+1372	1577	8003703803987479	WinIconManagement.exe	7ca5acc10f04b2ab
