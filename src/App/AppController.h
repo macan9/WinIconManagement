@@ -49,6 +49,10 @@ private:
     bool RestoreOriginalDesktopLayout();
     void UpdateWindowTitle();
     void UpdateOverlayWindow();
+    void UpdateDpiMetrics(UINT dpi);
+    void ApplyDpiFonts();
+    int ScaleForDpi(int value) const;
+    UINT GetWindowDpi() const;
 
     HINSTANCE instance_;
     HWND mainWindow_;
@@ -71,6 +75,9 @@ private:
     UINT taskbarCreatedMessage_;
     UINT_PTR desktopHealthTimerId_;
     UINT desktopHealthIntervalMs_;
+    UINT currentDpi_;
+    HFONT uiFont_;
+    HFONT titleFont_;
     bool isPinned_;
     bool isPaused_;
     bool isExiting_;

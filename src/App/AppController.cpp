@@ -17,8 +17,49 @@ constexpr wchar_t kMainWindowClassName[] = L"WinIconManagement.MainWindow";
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT_PTR kDesktopHealthTimerId = 1;
 constexpr UINT kDesktopHealthIntervalMs = 3000;
+constexpr UINT kDefaultDpi = 96;
 constexpr int kGridPaddingPixels = 16;
 constexpr int kMinimumGridSpacing = 48;
+constexpr int kBaseWindowWidth = 1280;
+constexpr int kBaseWindowHeight = 900;
+constexpr int kMinWindowWidth = 960;
+constexpr int kMinWindowHeight = 680;
+
+UINT GetDpiForWindowCompat(HWND window) {
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32 != nullptr) {
+        const auto getDpiForWindow =
+            reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(user32, "GetDpiForWindow"));
+        if (getDpiForWindow != nullptr && window != nullptr) {
+            const UINT dpi = getDpiForWindow(window);
+            if (dpi != 0) {
+                return dpi;
+            }
+        }
+    }
+
+    HDC screenDc = GetDC(window);
+    const int dpi = screenDc != nullptr ? GetDeviceCaps(screenDc, LOGPIXELSX) : static_cast<int>(kDefaultDpi);
+    if (screenDc != nullptr) {
+        ReleaseDC(window, screenDc);
+    }
+    return dpi > 0 ? static_cast<UINT>(dpi) : kDefaultDpi;
+}
+
+bool AdjustWindowRectForDpiCompat(RECT* rect, DWORD style, BOOL hasMenu, DWORD exStyle, UINT dpi) {
+    using AdjustWindowRectExForDpiFn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32 != nullptr) {
+        const auto adjustWindowRectExForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
+            GetProcAddress(user32, "AdjustWindowRectExForDpi"));
+        if (adjustWindowRectExForDpi != nullptr) {
+            return adjustWindowRectExForDpi(rect, style, hasMenu, exStyle, dpi) != FALSE;
+        }
+    }
+
+    return AdjustWindowRectEx(rect, style, hasMenu, exStyle) != FALSE;
+}
 
 std::wstring HandleToString(HWND handle) {
     if (handle == nullptr) {
@@ -295,6 +336,9 @@ AppController::AppController(HINSTANCE instance)
       taskbarCreatedMessage_(RegisterWindowMessageW(L"TaskbarCreated")),
       desktopHealthTimerId_(kDesktopHealthTimerId),
       desktopHealthIntervalMs_(kDesktopHealthIntervalMs),
+      currentDpi_(kDefaultDpi),
+      uiFont_(nullptr),
+      titleFont_(nullptr),
       isPinned_(false),
       isPaused_(false),
       isExiting_(false),
@@ -308,6 +352,14 @@ AppController::~AppController() {
     if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
         DestroyWindow(mainWindow_);
         mainWindow_ = nullptr;
+    }
+    if (uiFont_ != nullptr) {
+        DeleteObject(uiFont_);
+        uiFont_ = nullptr;
+    }
+    if (titleFont_ != nullptr) {
+        DeleteObject(titleFont_);
+        titleFont_ = nullptr;
     }
 }
 
@@ -345,12 +397,12 @@ bool AppController::InitializePersistence() {
         Infrastructure::GetUserWritableAppDirectory() / L"data" / L"win_icon_management.db";
 
     if (!database_.Open(databasePath)) {
-        desktopIconReadStatus_ = L"持久化初始化失败: 数据库打开失败";
+        desktopIconReadStatus_ = L"Persistence init failed: unable to open database.";
         return false;
     }
 
     if (!Persistence::EnsureSchema(database_)) {
-        desktopIconReadStatus_ = L"持久化初始化失败: 数据库结构迁移失败";
+        desktopIconReadStatus_ = L"Persistence init failed: schema migration failed.";
         database_.Close();
         return false;
     }
@@ -457,15 +509,22 @@ bool AppController::RegisterWindowClass() {
 }
 
 bool AppController::CreateMainWindow() {
+    const DWORD windowStyle = WS_OVERLAPPEDWINDOW;
+    currentDpi_ = GetDpiForWindowCompat(nullptr);
+    UpdateDpiMetrics(currentDpi_);
+
+    RECT windowRect{0, 0, ScaleForDpi(kBaseWindowWidth), ScaleForDpi(kBaseWindowHeight)};
+    AdjustWindowRectForDpiCompat(&windowRect, windowStyle, FALSE, 0, currentDpi_);
+
     mainWindow_ = CreateWindowExW(
         0,
         kMainWindowClassName,
         L"WinIconManagement - Initialization Stage",
-        WS_OVERLAPPEDWINDOW,
+        windowStyle,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        900,
-        600,
+        windowRect.right - windowRect.left,
+        windowRect.bottom - windowRect.top,
         nullptr,
         nullptr,
         instance_,
@@ -477,6 +536,17 @@ bool AppController::CreateMainWindow() {
             L"CreateWindowExW failed. error=" + std::to_wstring(error));
         return false;
     }
+
+    currentDpi_ = GetWindowDpi();
+    UpdateDpiMetrics(currentDpi_);
+    SetWindowPos(
+        mainWindow_,
+        nullptr,
+        0,
+        0,
+        ScaleForDpi(kMinWindowWidth),
+        ScaleForDpi(kMinWindowHeight),
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 
     if (!CreateDiagnosticsTextControl()) {
         return false;
@@ -496,10 +566,10 @@ bool AppController::CreateDiagnosticsTextControl() {
         L"",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE |
             ES_AUTOVSCROLL | ES_READONLY | ES_NOHIDESEL,
-        24,
-        106,
-        800,
-        460,
+        ScaleForDpi(24),
+        ScaleForDpi(122),
+        ScaleForDpi(800),
+        ScaleForDpi(460),
         mainWindow_,
         nullptr,
         instance_,
@@ -512,11 +582,7 @@ bool AppController::CreateDiagnosticsTextControl() {
         return false;
     }
 
-    SendMessageW(
-        diagnosticsTextControl_,
-        WM_SETFONT,
-        reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
-        TRUE);
+    ApplyDpiFonts();
     return true;
 }
 
@@ -525,12 +591,12 @@ void AppController::LayoutDiagnosticsTextControl(int clientWidth, int clientHeig
         return;
     }
 
-    const int left = 24;
-    const int top = 106;
-    const int rightPadding = 24;
-    const int bottomPadding = 24;
-    const int minWidth = 120;
-    const int minHeight = 80;
+    const int left = ScaleForDpi(24);
+    const int top = ScaleForDpi(160);
+    const int rightPadding = ScaleForDpi(24);
+    const int bottomPadding = ScaleForDpi(24);
+    const int minWidth = ScaleForDpi(280);
+    const int minHeight = ScaleForDpi(220);
 
     int width = clientWidth - left - rightPadding;
     int height = clientHeight - top - bottomPadding;
@@ -551,6 +617,49 @@ void AppController::UpdateDiagnosticsTextControl() {
 
     const std::wstring text = BuildDesktopResolveStatusText();
     SetWindowTextW(diagnosticsTextControl_, text.c_str());
+}
+
+void AppController::UpdateDpiMetrics(UINT dpi) {
+    currentDpi_ = dpi == 0 ? kDefaultDpi : dpi;
+
+    if (uiFont_ != nullptr) {
+        DeleteObject(uiFont_);
+        uiFont_ = nullptr;
+    }
+    if (titleFont_ != nullptr) {
+        DeleteObject(titleFont_);
+        titleFont_ = nullptr;
+    }
+
+    LOGFONTW bodyFont{};
+    bodyFont.lfHeight = -MulDiv(18, static_cast<int>(currentDpi_), static_cast<int>(kDefaultDpi));
+    bodyFont.lfWeight = FW_NORMAL;
+    bodyFont.lfQuality = CLEARTYPE_QUALITY;
+    wcscpy_s(bodyFont.lfFaceName, LF_FACESIZE, L"Microsoft YaHei UI");
+    uiFont_ = CreateFontIndirectW(&bodyFont);
+
+    LOGFONTW headingFont = bodyFont;
+    headingFont.lfHeight = -MulDiv(30, static_cast<int>(currentDpi_), static_cast<int>(kDefaultDpi));
+    headingFont.lfWeight = FW_SEMIBOLD;
+    titleFont_ = CreateFontIndirectW(&headingFont);
+}
+
+void AppController::ApplyDpiFonts() {
+    if (diagnosticsTextControl_ != nullptr && IsWindow(diagnosticsTextControl_)) {
+        SendMessageW(
+            diagnosticsTextControl_,
+            WM_SETFONT,
+            reinterpret_cast<WPARAM>(uiFont_ != nullptr ? uiFont_ : GetStockObject(DEFAULT_GUI_FONT)),
+            TRUE);
+    }
+}
+
+int AppController::ScaleForDpi(int value) const {
+    return MulDiv(value, static_cast<int>(currentDpi_), static_cast<int>(kDefaultDpi));
+}
+
+UINT AppController::GetWindowDpi() const {
+    return GetDpiForWindowCompat(mainWindow_);
 }
 
 bool AppController::InitializeTray() {
@@ -681,6 +790,12 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
             UpdateWindowTitle();
             return 0;
         case WM_DPICHANGED: {
+            currentDpi_ = HIWORD(wParam);
+            if (currentDpi_ == 0) {
+                currentDpi_ = GetWindowDpi();
+            }
+            UpdateDpiMetrics(currentDpi_);
+            ApplyDpiFonts();
             const auto* suggestedRect = reinterpret_cast<RECT*>(lParam);
             if (suggestedRect != nullptr) {
                 SetWindowPos(
@@ -692,6 +807,10 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
                     suggestedRect->bottom - suggestedRect->top,
                     SWP_NOZORDER | SWP_NOACTIVATE);
             }
+            RECT clientRect{};
+            GetClientRect(hwnd, &clientRect);
+            LayoutDiagnosticsTextControl(clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
+            InvalidateRect(hwnd, nullptr, TRUE);
             Infrastructure::Logger::Get().Info(L"DPI changed, refreshing desktop resolve.");
             ResolveDesktopWindows(false);
             UpdateOverlayWindow();
@@ -769,7 +888,7 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
             if (!MoveTestDesktopIcon()) {
                 MessageBoxW(
                     hwnd,
-                    L"测试移动失败，请查看日志。",
+                    L"Batch move failed. Please check the log.",
                     L"WinIconManagement",
                     MB_OK | MB_ICONWARNING);
             }
@@ -779,7 +898,7 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
             if (!RestoreOriginalDesktopLayout()) {
                 MessageBoxW(
                     hwnd,
-                    L"恢复原始布局失败，请先执行一次“批量网格移动”并查看日志。",
+                    L"Restore layout failed. Please run batch grid move once and check the log.",
                     L"WinIconManagement",
                     MB_OK | MB_ICONWARNING);
             }
@@ -812,27 +931,45 @@ void AppController::PaintMainWindow(HWND hwnd) {
     GetClientRect(hwnd, &clientRect);
     SetBkMode(deviceContext, TRANSPARENT);
 
-    HGDIOBJ previousFont = SelectObject(deviceContext, GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ previousFont = SelectObject(
+        deviceContext,
+        titleFont_ != nullptr ? titleFont_ : GetStockObject(DEFAULT_GUI_FONT));
 
-    RECT titleRect{24, 20, clientRect.right - 24, 48};
+    RECT titleRect{
+        ScaleForDpi(24),
+        ScaleForDpi(24),
+        clientRect.right - ScaleForDpi(24),
+        ScaleForDpi(72)};
     DrawTextW(deviceContext, L"WinIconManagement", -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-    RECT labelRect{24, 48, clientRect.right - 24, 72};
-    DrawTextW(deviceContext, L"桌面连接状态", -1, &labelRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(deviceContext, uiFont_ != nullptr ? uiFont_ : GetStockObject(DEFAULT_GUI_FONT));
+    RECT labelRect{
+        ScaleForDpi(24),
+        ScaleForDpi(84),
+        clientRect.right - ScaleForDpi(24),
+        ScaleForDpi(120)};
+    DrawTextW(deviceContext, L"Desktop Connection Status", -1, &labelRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     const COLORREF statusColor = isDesktopConnected_ ? RGB(40, 167, 69) : RGB(220, 53, 69);
     HBRUSH statusBrush = CreateSolidBrush(statusColor);
     HPEN statusPen = CreatePen(PS_SOLID, 1, statusColor);
     HGDIOBJ previousBrush = SelectObject(deviceContext, statusBrush);
     HGDIOBJ previousPen = SelectObject(deviceContext, statusPen);
-    Ellipse(deviceContext, 24, 82, 36, 94);
+    const int statusLeft = ScaleForDpi(24);
+    const int statusTop = ScaleForDpi(130);
+    const int statusSize = ScaleForDpi(16);
+    Ellipse(deviceContext, statusLeft, statusTop, statusLeft + statusSize, statusTop + statusSize);
     SelectObject(deviceContext, previousPen);
     SelectObject(deviceContext, previousBrush);
     DeleteObject(statusPen);
     DeleteObject(statusBrush);
 
-    const wchar_t* statusText = isDesktopConnected_ ? L"连接桌面成功" : L"桌面连接失败";
-    RECT statusRect{44, 78, clientRect.right - 24, 98};
+    const wchar_t* statusText = isDesktopConnected_ ? L"Connected to desktop" : L"Desktop connection failed";
+    RECT statusRect{
+        ScaleForDpi(48),
+        ScaleForDpi(122),
+        clientRect.right - ScaleForDpi(24),
+        ScaleForDpi(150)};
     DrawTextW(deviceContext, statusText, -1, &statusRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     SelectObject(deviceContext, previousFont);
@@ -868,7 +1005,7 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
     if (fromManualReconnect) {
         MessageBoxW(
             mainWindow_,
-            L"重新连接桌面失败，请查看日志后重试。",
+            L"Reconnect desktop failed. Please check the log and try again.",
             L"WinIconManagement",
             MB_OK | MB_ICONWARNING);
     }
@@ -911,8 +1048,8 @@ void AppController::CacheOriginalIconPositions() {
 
 bool AppController::MoveTestDesktopIcon() {
     if (!EnsureDesktopAndIconsReady()) {
-        desktopIconReadStatus_ = L"测试移动失败: 桌面图标不可用";
-        lastGridMoveSummary_ = L"失败: 桌面图标不可用";
+        desktopIconReadStatus_ = L"Batch move failed: desktop icons unavailable.";
+        lastGridMoveSummary_ = L"Failed: desktop icons unavailable.";
         UpdateDiagnosticsTextControl();
         return false;
     }
@@ -922,8 +1059,8 @@ bool AppController::MoveTestDesktopIcon() {
     GridMovePlan plan{};
     if (!BuildGridMovePlan(desktopIcons_, display.virtualDesktopRect, &plan) ||
         plan.iconsToMove.empty()) {
-        desktopIconReadStatus_ = L"测试移动失败: 无法计算可见网格目标点";
-        lastGridMoveSummary_ = L"失败: 无法计算可见网格目标点";
+        desktopIconReadStatus_ = L"Batch move failed: unable to compute visible grid targets.";
+        lastGridMoveSummary_ = L"Failed: unable to compute visible grid targets.";
         Infrastructure::Logger::Get().Error(
             L"[DesktopMove] bulk grid plan failed. iconCount=" + std::to_wstring(desktopIcons_.size()) +
             L"; workArea=" + RectToString(display.virtualDesktopRect));
@@ -953,8 +1090,8 @@ bool AppController::MoveTestDesktopIcon() {
     }
 
     if (meaningfulMoveCount == 0) {
-        desktopIconReadStatus_ = L"测试移动失败: 规划结果位移过小";
-        lastGridMoveSummary_ = L"失败: 规划位移过小";
+        desktopIconReadStatus_ = L"Batch move failed: planned displacement is too small.";
+        lastGridMoveSummary_ = L"Failed: planned displacement is too small.";
         Infrastructure::Logger::Get().Error(
             L"[DesktopMove] bulk grid plan rejected. meaningfulMoveCount=0; "
             L"origin=" + PointToString(plan.origin) +
@@ -989,8 +1126,8 @@ bool AppController::MoveTestDesktopIcon() {
         L"; workArea=" + RectToString(plan.workArea));
 
     if (movedCount <= 0) {
-        desktopIconReadStatus_ = L"测试移动失败: 批量移动未成功";
-        lastGridMoveSummary_ = L"失败: " + lastGridMoveSummary_;
+        desktopIconReadStatus_ = L"Batch move failed: no icons were moved.";
+        lastGridMoveSummary_ = L"Failed: " + lastGridMoveSummary_;
         UpdateDiagnosticsTextControl();
         return false;
     }
@@ -1000,10 +1137,10 @@ bool AppController::MoveTestDesktopIcon() {
     RefreshDesktopIconSnapshot();
     PersistIconSnapshot(L"after_batch_move", L"auto");
     if (movedCount == expected) {
-        desktopIconReadStatus_ = L"测试移动成功: 批量网格移动完成 " +
+        desktopIconReadStatus_ = L"Batch move completed: " +
                                  std::to_wstring(movedCount) + L"/" + std::to_wstring(expected);
     } else {
-        desktopIconReadStatus_ = L"测试移动部分成功: 批量网格移动 " +
+        desktopIconReadStatus_ = L"Batch move partially completed: " +
                                  std::to_wstring(movedCount) + L"/" + std::to_wstring(expected);
     }
     UpdateDiagnosticsTextControl();
@@ -1012,25 +1149,25 @@ bool AppController::MoveTestDesktopIcon() {
 
 bool AppController::RestoreOriginalDesktopLayout() {
     if (!EnsureDesktopConnection()) {
-        desktopIconReadStatus_ = L"恢复失败: 桌面连接不可用";
-        lastGridMoveSummary_ = L"恢复失败: 桌面连接不可用";
+        desktopIconReadStatus_ = L"Restore failed: desktop connection unavailable.";
+        lastGridMoveSummary_ = L"Restore failed: desktop connection unavailable.";
         UpdateDiagnosticsTextControl();
         return false;
     }
     if (originalDesktopIcons_.empty()) {
-        desktopIconReadStatus_ = L"恢复失败: 没有可恢复的原始快照";
-        lastGridMoveSummary_ = L"恢复失败: 没有可恢复的原始快照";
+        desktopIconReadStatus_ = L"Restore failed: no original snapshot available.";
+        lastGridMoveSummary_ = L"Restore failed: no original snapshot available.";
         Infrastructure::Logger::Get().Error(L"[DesktopMove] restore skipped: no original snapshot.");
         UpdateDiagnosticsTextControl();
         return false;
     }
 
-    // Restore 前先做一次重连，避免 Explorer 在 move 后重启导致旧句柄失效。
+    // Reconnect before restore to avoid stale handles after Explorer restarts.
     ResolveDesktopWindows(false);
     if (!isDesktopConnected_ ||
         !Desktop::DesktopWindowResolver::IsWindowChainValid(desktopResolveResult_)) {
-        desktopIconReadStatus_ = L"恢复失败: 桌面句柄失效，重连未成功";
-        lastGridMoveSummary_ = L"恢复失败: 桌面句柄失效";
+        desktopIconReadStatus_ = L"Restore failed: desktop handle invalid after reconnect.";
+        lastGridMoveSummary_ = L"Restore failed: desktop handle invalid.";
         Infrastructure::Logger::Get().Error(L"[DesktopMove] restore aborted: desktop reconnect failed.");
         UpdateDiagnosticsTextControl();
         return false;
@@ -1051,13 +1188,13 @@ bool AppController::RestoreOriginalDesktopLayout() {
     RefreshDesktopIconSnapshot();
     PersistIconSnapshot(L"after_restore", L"auto");
     if (movedCount == expected) {
-        desktopIconReadStatus_ = L"恢复完成";
-        lastGridMoveSummary_ = L"恢复完成: " +
+        desktopIconReadStatus_ = L"Restore completed.";
+        lastGridMoveSummary_ = L"Restore completed: " +
                                std::to_wstring(movedCount) + L"/" + std::to_wstring(expected);
     } else {
-        desktopIconReadStatus_ = L"恢复部分成功: " +
+        desktopIconReadStatus_ = L"Restore partially completed: " +
                                  std::to_wstring(movedCount) + L"/" + std::to_wstring(expected);
-        lastGridMoveSummary_ = L"恢复部分成功: " +
+        lastGridMoveSummary_ = L"Restore partially completed: " +
                                std::to_wstring(movedCount) + L"/" + std::to_wstring(expected);
     }
     UpdateDiagnosticsTextControl();
@@ -1123,7 +1260,7 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
     }
 
     std::wstring text;
-    text += L"解析路径:\r\n";
+    text += L"Resolve Path:\r\n";
     text += L"  " + wrappedPath + L"\r\n";
     text += L"Fallback: " + std::wstring(desktopResolveResult_.usedEnumWindowsFallback ? L"true" : L"false") + L"\r\n";
     text += L"Progman: " + HandleToString(desktopResolveResult_.progmanWindow) +
@@ -1141,25 +1278,25 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
             L" (" + desktopResolveResult_.listViewClassName + L")\r\n";
     text += L"Explorer PID: " + std::to_wstring(desktopResolveResult_.explorerProcessId) + L"\r\n";
     const DisplayDiagnostics display = CollectDisplayDiagnostics();
-    text += L"显示器数量: " + std::to_wstring(display.monitorCount) + L"\r\n";
-    text += L"虚拟桌面范围: " + RectToString(display.virtualDesktopRect) + L"\r\n";
+    text += L"Monitor Count: " + std::to_wstring(display.monitorCount) + L"\r\n";
+    text += L"Virtual Desktop: " + RectToString(display.virtualDesktopRect) + L"\r\n";
     if (!display.monitorDetails.empty()) {
-        text += L"显示器详情:\r\n" + display.monitorDetails;
+        text += L"Monitor Details:\r\n" + display.monitorDetails;
     }
 
-    text += L"\r\n桌面图标预期数: " + std::to_wstring(desktopIconCount_) + L"\r\n";
-    text += L"桌面图标读取数: " + std::to_wstring(desktopIcons_.size()) + L"\r\n";
-    text += L"图标读取状态: " + desktopIconReadStatus_ + L"\r\n";
-    text += L"批量移动摘要: " + lastGridMoveSummary_ + L"\r\n";
-    text += L"持久化状态: " + std::wstring(persistenceReady_ ? L"ready" : L"not ready") + L"\r\n";
+    text += L"\r\nExpected Icons: " + std::to_wstring(desktopIconCount_) + L"\r\n";
+    text += L"Read Icons: " + std::to_wstring(desktopIcons_.size()) + L"\r\n";
+    text += L"Read Status: " + desktopIconReadStatus_ + L"\r\n";
+    text += L"Batch Move Summary: " + lastGridMoveSummary_ + L"\r\n";
+    text += L"Persistence: " + std::wstring(persistenceReady_ ? L"ready" : L"not ready") + L"\r\n";
     if (persistenceReady_) {
-        text += L"数据库路径: " + database_.DatabasePath().wstring() + L"\r\n";
+        text += L"Database Path: " + database_.DatabasePath().wstring() + L"\r\n";
     } else if (!database_.LastError().empty()) {
-        text += L"数据库错误: " + database_.LastError() + L"\r\n";
+        text += L"Database Error: " + database_.LastError() + L"\r\n";
     }
-    text += L"原始快照缓存数: " + std::to_wstring(originalDesktopIcons_.size()) + L"\r\n";
+    text += L"Original Snapshot Count: " + std::to_wstring(originalDesktopIcons_.size()) + L"\r\n";
     if (!desktopIcons_.empty()) {
-        text += L"图标样例:\r\n";
+        text += L"Icon Samples:\r\n";
         const size_t sampleCount = std::min<size_t>(desktopIcons_.size(), 10);
         for (size_t i = 0; i < sampleCount; ++i) {
             const Desktop::DesktopIcon& icon = desktopIcons_[i];
@@ -1170,10 +1307,10 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
     }
 
     if (!isDesktopConnected_) {
-        text += L"失败步骤: " +
+        text += L"Failure Step: " +
                 (desktopResolveResult_.failureStep.empty() ? std::wstring(L"<unknown>") : desktopResolveResult_.failureStep) +
                 L"\r\n";
-        text += L"失败码: " + std::to_wstring(desktopResolveResult_.failureCode) + L"\r\n";
+        text += L"Failure Code: " + std::to_wstring(desktopResolveResult_.failureCode) + L"\r\n";
     }
 
     return text;
