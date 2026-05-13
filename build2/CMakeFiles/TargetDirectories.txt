@@ -1,0 +1,3 @@
+D:/MyProjects/WinIconManagement/build2/CMakeFiles/WinIconManagement.dir
+D:/MyProjects/WinIconManagement/build2/CMakeFiles/edit_cache.dir
+D:/MyProjects/WinIconManagement/build2/CMakeFiles/rebuild_cache.dir

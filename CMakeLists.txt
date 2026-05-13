@@ -13,10 +13,17 @@ add_executable(WinIconManagement WIN32
     src/App/SingleInstance.cpp
     src/Desktop/DesktopIconService.cpp
     src/Desktop/DesktopWindowResolver.cpp
+    src/Overlay/OverlayWindow.cpp
     src/Tray/TrayIcon.cpp
     src/Infrastructure/Dpi.cpp
     src/Infrastructure/Logger.cpp
     src/Infrastructure/Paths.cpp
+    src/Persistence/Database.cpp
+    src/Persistence/Schema.cpp
+    src/Persistence/Models.cpp
+    src/Persistence/SettingsRepository.cpp
+    src/Persistence/FenceRepository.cpp
+    src/Persistence/SnapshotRepository.cpp
     resources/app.rc
 )
 
@@ -42,4 +49,5 @@ target_link_libraries(WinIconManagement PRIVATE
     user32
     shell32
     shlwapi
+    winsqlite3
 )

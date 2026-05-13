@@ -7,6 +7,10 @@
 
 #include "Desktop/DesktopIconService.h"
 #include "Desktop/DesktopWindowResolver.h"
+#include "Persistence/Database.h"
+#include "Persistence/SettingsRepository.h"
+#include "Persistence/SnapshotRepository.h"
+#include "Overlay/OverlayWindow.h"
 #include "Tray/TrayIcon.h"
 
 namespace App {
@@ -38,9 +42,13 @@ private:
     bool EnsureDesktopConnection();
     bool EnsureDesktopAndIconsReady();
     void CacheOriginalIconPositions();
+    bool InitializePersistence();
+    void PersistBasicSettings();
+    void PersistIconSnapshot(const std::wstring& name, const std::wstring& source);
     bool MoveTestDesktopIcon();
     bool RestoreOriginalDesktopLayout();
     void UpdateWindowTitle();
+    void UpdateOverlayWindow();
 
     HINSTANCE instance_;
     HWND mainWindow_;
@@ -53,6 +61,12 @@ private:
     std::vector<Desktop::DesktopIcon> desktopIcons_;
     std::vector<Desktop::DesktopIcon> originalDesktopIcons_;
     std::wstring desktopIconReadStatus_;
+    std::wstring lastGridMoveSummary_;
+    Persistence::Database database_;
+    Persistence::SettingsRepository settingsRepository_;
+    Persistence::SnapshotRepository snapshotRepository_;
+    Overlay::OverlayWindow overlayWindow_;
+    bool persistenceReady_;
     UINT trayCallbackMessage_;
     UINT taskbarCreatedMessage_;
     UINT_PTR desktopHealthTimerId_;

@@ -13,7 +13,7 @@ BEGIN
         MENUITEM L"固定",            IDM_TRAY_TOGGLE_PIN
         MENUITEM L"暂停管理",        IDM_TRAY_PAUSE
         MENUITEM L"重新连接桌面",    IDM_TRAY_RECONNECT_DESKTOP
-        MENUITEM L"测试移动图标",    IDM_TRAY_TEST_MOVE_ICON
+        MENUITEM L"批量网格移动",    IDM_TRAY_TEST_MOVE_ICON
         MENUITEM L"恢复原始布局",    IDM_TRAY_RESTORE_LAYOUT
         MENUITEM SEPARATOR
         MENUITEM L"退出",            IDM_TRAY_EXIT

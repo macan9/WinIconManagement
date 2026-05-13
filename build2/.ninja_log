@@ -1,0 +1,19 @@
+# ninja log v6
+74	217	8003685233378316	CMakeFiles/WinIconManagement.dir/resources/app.rc.res	5a6df193f7f2d5de
+48	303	8003685233118305	CMakeFiles/WinIconManagement.dir/src/Infrastructure/Dpi.cpp.obj	3dc7b53446a5b676
+35	770	8003685232988283	CMakeFiles/WinIconManagement.dir/src/App/SingleInstance.cpp.obj	6fdd2408822e60ca
+40	783	8003685233038292	CMakeFiles/WinIconManagement.dir/src/Desktop/DesktopWindowResolver.cpp.obj	b7737940c7d70b88
+37	951	8003685233008282	CMakeFiles/WinIconManagement.dir/src/Desktop/DesktopIconService.cpp.obj	e3363c7fe20d3925
+62	1233	8003685233258304	CMakeFiles/WinIconManagement.dir/src/Persistence/Models.cpp.obj	68b86916281dd059
+68	1947	8003685233318293	CMakeFiles/WinIconManagement.dir/src/Persistence/FenceRepository.cpp.obj	16518c6a9d64b45d
+59	1952	8003685233238309	CMakeFiles/WinIconManagement.dir/src/Persistence/Schema.cpp.obj	c899f0981b17d5a9
+51	2038	8003685233148290	CMakeFiles/WinIconManagement.dir/src/Infrastructure/Logger.cpp.obj	39790da0ff47ea39
+43	2149	8003685233068289	CMakeFiles/WinIconManagement.dir/src/Overlay/OverlayWindow.cpp.obj	f3ef06420a91e2c4
+65	2151	8003685233288306	CMakeFiles/WinIconManagement.dir/src/Persistence/SettingsRepository.cpp.obj	7a20e6d99a7f4a06
+45	2161	8003685233098291	CMakeFiles/WinIconManagement.dir/src/Tray/TrayIcon.cpp.obj	291532fb661ed91
+71	2165	8003685233348299	CMakeFiles/WinIconManagement.dir/src/Persistence/SnapshotRepository.cpp.obj	2c566896b0231667
+56	2186	8003685233208299	CMakeFiles/WinIconManagement.dir/src/Persistence/Database.cpp.obj	b745bb93a81faf14
+29	2193	8003685232928285	CMakeFiles/WinIconManagement.dir/src/main.cpp.obj	39124a38ba4175cd
+32	2282	8003685232968289	CMakeFiles/WinIconManagement.dir/src/App/AppController.cpp.obj	6ce461a505c83da0
+53	2332	8003685233178293	CMakeFiles/WinIconManagement.dir/src/Infrastructure/Paths.cpp.obj	1ff3e45ce68d3de7
+2333	2795	8003685255975865	WinIconManagement.exe	7ca5acc10f04b2ab
