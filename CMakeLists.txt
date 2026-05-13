@@ -14,6 +14,7 @@ add_executable(WinIconManagement WIN32
     src/Desktop/DesktopIconService.cpp
     src/Desktop/DesktopWindowResolver.cpp
     src/Overlay/OverlayWindow.cpp
+    src/Interaction/MouseController.cpp
     src/Tray/TrayIcon.cpp
     src/Infrastructure/Dpi.cpp
     src/Infrastructure/Logger.cpp

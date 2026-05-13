@@ -7,7 +7,9 @@
 
 #include "Desktop/DesktopIconService.h"
 #include "Desktop/DesktopWindowResolver.h"
+#include "Interaction/MouseController.h"
 #include "Persistence/Database.h"
+#include "Persistence/FenceRepository.h"
 #include "Persistence/SettingsRepository.h"
 #include "Persistence/SnapshotRepository.h"
 #include "Overlay/OverlayWindow.h"
@@ -45,6 +47,24 @@ private:
     bool InitializePersistence();
     void PersistBasicSettings();
     void PersistIconSnapshot(const std::wstring& name, const std::wstring& source);
+    void HandleSelectionStarted(const POINT& startPoint);
+    void HandleSelectionUpdated(const RECT& selectionRect);
+    void HandleSelectionCompleted(const RECT& selectionRect, const POINT& releasePoint);
+    void HandleSelectionCanceled();
+    bool HandleSelectionConfirmMouseFilter(WPARAM message, const POINT& point);
+    void ConfirmSelectionRect(const RECT& selectionRect, const POINT& anchorPoint);
+    void HandleSelectionConfirmDecision(bool confirmed);
+    void CancelSelectionRect();
+    void ApplyFenceFromSelectionRect(const RECT& selectionRect);
+    [[nodiscard]] std::vector<Desktop::DesktopIcon> CollectIconsInRect(const RECT& selectionRect) const;
+    [[nodiscard]] RECT BuildFenceRectFromSelection(const RECT& selectionRect) const;
+    [[nodiscard]] std::vector<Desktop::DesktopIcon> BuildIconsForFenceLayout(
+        const std::vector<Desktop::DesktopIcon>& selectedIcons,
+        const RECT& fenceRect) const;
+    void SaveFenceSelection(
+        const RECT& fenceRect,
+        const std::vector<Desktop::DesktopIcon>& originalIcons,
+        const std::vector<Desktop::DesktopIcon>& movedIcons);
     bool MoveTestDesktopIcon();
     bool RestoreOriginalDesktopLayout();
     void UpdateWindowTitle();
@@ -64,12 +84,16 @@ private:
     int desktopIconCount_;
     std::vector<Desktop::DesktopIcon> desktopIcons_;
     std::vector<Desktop::DesktopIcon> originalDesktopIcons_;
+    RECT pendingSelectionRect_;
+    bool hasPendingSelectionRect_;
     std::wstring desktopIconReadStatus_;
     std::wstring lastGridMoveSummary_;
     Persistence::Database database_;
+    Persistence::FenceRepository fenceRepository_;
     Persistence::SettingsRepository settingsRepository_;
     Persistence::SnapshotRepository snapshotRepository_;
     Overlay::OverlayWindow overlayWindow_;
+    Interaction::MouseController mouseController_;
     bool persistenceReady_;
     UINT trayCallbackMessage_;
     UINT taskbarCreatedMessage_;

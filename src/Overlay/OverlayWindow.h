@@ -2,9 +2,13 @@
 
 #include <windows.h>
 
+#include <functional>
+
 namespace Overlay {
 class OverlayWindow {
 public:
+    using SelectionConfirmCallback = std::function<void(bool confirmed)>;
+
     OverlayWindow();
     ~OverlayWindow();
 
@@ -23,8 +27,22 @@ public:
     void SetFenceRect(const RECT& fenceRect);
     void SetVirtualDesktopRect(const RECT& virtualDesktopRect);
     void SetDesktopHostWindow(HWND desktopHostWindow);
+    void SetSelectionRect(const RECT& selectionRect);
+    void ClearSelectionRect();
+    void ShowSelectionConfirm(const RECT& selectionRect, const POINT& anchorPoint);
+    void HideSelectionConfirm();
+    [[nodiscard]] bool IsSelectionConfirmVisible() const;
+    [[nodiscard]] bool IsPointInSelectionConfirm(POINT screenPoint) const;
+    [[nodiscard]] bool HandleSelectionConfirmClick(WPARAM message, POINT screenPoint);
+    void SetSelectionConfirmCallback(SelectionConfirmCallback onSelectionConfirm);
 
 private:
+    enum class SelectionConfirmAction {
+        None = 0,
+        Confirm = 1,
+        Cancel = 2,
+    };
+
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -35,6 +53,13 @@ private:
     void NormalizeFenceRect();
     void EnsureDesktopLayerZOrder() const;
     void Paint(HWND hwnd);
+    void NormalizeSelectionRect();
+    [[nodiscard]] RECT BuildConfirmRect() const;
+    [[nodiscard]] RECT BuildConfirmButtonRect() const;
+    [[nodiscard]] RECT BuildCancelButtonRect() const;
+    void DrawConfirmUI(HDC hdc) const;
+    [[nodiscard]] SelectionConfirmAction HitTestConfirmAction(POINT localPoint) const;
+    void SetSelectionConfirmAction(SelectionConfirmAction action);
 
     HINSTANCE instance_;
     HWND ownerWindow_;
@@ -42,6 +67,14 @@ private:
     HWND desktopHostWindow_;
     RECT virtualDesktopRect_;
     RECT fenceRect_;
+    RECT selectionRect_;
+    bool hasSelectionRect_;
+    bool selectionConfirmVisible_;
+    POINT selectionConfirmAnchor_;
+    RECT selectionConfirmRect_;
+    SelectionConfirmAction selectionConfirmAction_;
+    SelectionConfirmAction selectionConfirmHoverAction_;
+    SelectionConfirmCallback onSelectionConfirm_;
     bool fixedMode_;
     bool visible_;
     bool paintLogged_;

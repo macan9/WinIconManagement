@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <string>
 #include <sstream>
+#include <utility>
 
 #include "Infrastructure/Logger.h"
 
@@ -13,6 +14,23 @@ constexpr COLORREF kFenceFillColor = RGB(76, 143, 255);
 constexpr COLORREF kFenceBorderColor = RGB(36, 99, 235);
 constexpr BYTE kFenceFillAlpha = 70;
 constexpr int kFenceBorderWidth = 2;
+constexpr COLORREF kSelectionFillColor = RGB(59, 130, 246);
+constexpr COLORREF kSelectionBorderColor = RGB(37, 99, 235);
+constexpr int kSelectionBorderWidth = 2;
+constexpr BYTE kSelectionOnlyAlpha = 140;
+constexpr int kConfirmPopupWidth = 240;
+constexpr int kConfirmPopupHeight = 56;
+constexpr int kConfirmPopupPadding = 8;
+constexpr int kConfirmButtonWidth = 106;
+constexpr int kConfirmButtonHeight = 36;
+constexpr int kConfirmButtonGap = 10;
+constexpr COLORREF kConfirmPanelColor = RGB(19, 33, 58);
+constexpr COLORREF kConfirmPanelBorder = RGB(78, 118, 177);
+constexpr COLORREF kConfirmButtonColor = RGB(44, 94, 186);
+constexpr COLORREF kConfirmButtonHoverColor = RGB(63, 122, 227);
+constexpr COLORREF kCancelButtonColor = RGB(67, 76, 93);
+constexpr COLORREF kCancelButtonHoverColor = RGB(88, 99, 120);
+constexpr COLORREF kConfirmTextColor = RGB(238, 244, 255);
 }
 
 namespace Overlay {
@@ -23,6 +41,13 @@ OverlayWindow::OverlayWindow()
       desktopHostWindow_(nullptr),
       virtualDesktopRect_{0, 0, 0, 0},
       fenceRect_{120, 120, 560, 360},
+      selectionRect_{0, 0, 0, 0},
+      hasSelectionRect_(false),
+      selectionConfirmVisible_(false),
+      selectionConfirmAnchor_{0, 0},
+      selectionConfirmRect_{0, 0, 0, 0},
+      selectionConfirmAction_(SelectionConfirmAction::None),
+      selectionConfirmHoverAction_(SelectionConfirmAction::None),
       fixedMode_(true),
       visible_(false),
       paintLogged_(false) {}
@@ -150,6 +175,123 @@ void OverlayWindow::SetDesktopHostWindow(HWND desktopHostWindow) {
     Infrastructure::Logger::Get().Info(stream.str());
 }
 
+void OverlayWindow::SetSelectionRect(const RECT& selectionRect) {
+    selectionRect_ = selectionRect;
+    hasSelectionRect_ = true;
+    NormalizeSelectionRect();
+    if (IsInitialized()) {
+        ApplyRoundedRegion();
+        InvalidateRect(window_, nullptr, TRUE);
+    }
+}
+
+void OverlayWindow::ClearSelectionRect() {
+    if (!hasSelectionRect_ && !selectionConfirmVisible_) {
+        return;
+    }
+    hasSelectionRect_ = false;
+    selectionConfirmVisible_ = false;
+    selectionConfirmAction_ = SelectionConfirmAction::None;
+    selectionConfirmHoverAction_ = SelectionConfirmAction::None;
+    selectionRect_ = RECT{0, 0, 0, 0};
+    selectionConfirmRect_ = RECT{0, 0, 0, 0};
+    if (IsInitialized()) {
+        ApplyRoundedRegion();
+        InvalidateRect(window_, nullptr, TRUE);
+    }
+}
+
+void OverlayWindow::ShowSelectionConfirm(const RECT& selectionRect, const POINT& anchorPoint) {
+    selectionRect_ = selectionRect;
+    NormalizeSelectionRect();
+    hasSelectionRect_ = true;
+    selectionConfirmVisible_ = true;
+    selectionConfirmAnchor_ = anchorPoint;
+    selectionConfirmRect_ = BuildConfirmRect();
+    selectionConfirmAction_ = SelectionConfirmAction::None;
+    selectionConfirmHoverAction_ = SelectionConfirmAction::None;
+    if (IsInitialized()) {
+        ApplyClickThroughStyle();
+        ApplyRoundedRegion();
+        InvalidateRect(window_, nullptr, TRUE);
+    }
+}
+
+void OverlayWindow::HideSelectionConfirm() {
+    if (!selectionConfirmVisible_) {
+        return;
+    }
+    selectionConfirmVisible_ = false;
+    selectionConfirmAction_ = SelectionConfirmAction::None;
+    selectionConfirmHoverAction_ = SelectionConfirmAction::None;
+    selectionConfirmRect_ = RECT{0, 0, 0, 0};
+    if (IsInitialized()) {
+        ApplyClickThroughStyle();
+        ApplyRoundedRegion();
+        InvalidateRect(window_, nullptr, TRUE);
+    }
+}
+
+bool OverlayWindow::IsSelectionConfirmVisible() const {
+    return selectionConfirmVisible_;
+}
+
+bool OverlayWindow::IsPointInSelectionConfirm(POINT screenPoint) const {
+    if (!selectionConfirmVisible_) {
+        return false;
+    }
+    const RECT confirmRect = BuildConfirmRect();
+    const POINT localPoint{
+        screenPoint.x - virtualDesktopRect_.left,
+        screenPoint.y - virtualDesktopRect_.top};
+    return PtInRect(&confirmRect, localPoint) != FALSE;
+}
+
+bool OverlayWindow::HandleSelectionConfirmClick(WPARAM message, POINT screenPoint) {
+    if (!selectionConfirmVisible_) {
+        return false;
+    }
+    const POINT localPoint{
+        screenPoint.x - virtualDesktopRect_.left,
+        screenPoint.y - virtualDesktopRect_.top};
+
+    switch (message) {
+        case WM_MOUSEMOVE: {
+            const SelectionConfirmAction hovered = HitTestConfirmAction(localPoint);
+            if (hovered != selectionConfirmHoverAction_) {
+                selectionConfirmHoverAction_ = hovered;
+                if (IsInitialized()) {
+                    InvalidateRect(window_, nullptr, TRUE);
+                }
+            }
+            return true;
+        }
+        case WM_LBUTTONDOWN:
+            SetSelectionConfirmAction(HitTestConfirmAction(localPoint));
+            return true;
+        case WM_LBUTTONUP: {
+            const SelectionConfirmAction hitAction = HitTestConfirmAction(localPoint);
+            if (hitAction != SelectionConfirmAction::None && hitAction == selectionConfirmAction_) {
+                const bool confirmed = hitAction == SelectionConfirmAction::Confirm;
+                selectionConfirmAction_ = SelectionConfirmAction::None;
+                HideSelectionConfirm();
+                if (onSelectionConfirm_) {
+                    onSelectionConfirm_(confirmed);
+                }
+                return true;
+            }
+            selectionConfirmAction_ = SelectionConfirmAction::None;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+void OverlayWindow::SetSelectionConfirmCallback(SelectionConfirmCallback onSelectionConfirm) {
+    onSelectionConfirm_ = std::move(onSelectionConfirm);
+}
+
 LRESULT CALLBACK OverlayWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     OverlayWindow* overlay = nullptr;
     if (message == WM_NCCREATE) {
@@ -264,21 +406,83 @@ void OverlayWindow::ApplyRoundedRegion() {
     }
 
     NormalizeFenceRect();
-    const int offsetX = fenceRect_.left - virtualDesktopRect_.left;
-    const int offsetY = fenceRect_.top - virtualDesktopRect_.top;
-    const int width = std::max(1, static_cast<int>(fenceRect_.right - fenceRect_.left));
-    const int height = std::max(1, static_cast<int>(fenceRect_.bottom - fenceRect_.top));
+    const int fenceOffsetX = fenceRect_.left - virtualDesktopRect_.left;
+    const int fenceOffsetY = fenceRect_.top - virtualDesktopRect_.top;
+    const int fenceWidth = std::max(1, static_cast<int>(fenceRect_.right - fenceRect_.left));
+    const int fenceHeight = std::max(1, static_cast<int>(fenceRect_.bottom - fenceRect_.top));
+
     HRGN region = CreateRoundRectRgn(
-        offsetX,
-        offsetY,
-        offsetX + width + 1,
-        offsetY + height + 1,
+        fenceOffsetX,
+        fenceOffsetY,
+        fenceOffsetX + fenceWidth + 1,
+        fenceOffsetY + fenceHeight + 1,
         kFenceCornerRadiusPixels * 2,
         kFenceCornerRadiusPixels * 2);
     if (region == nullptr) {
         Infrastructure::Logger::Get().Error(L"[Overlay] CreateRoundRectRgn failed.");
         return;
     }
+
+    if (hasSelectionRect_) {
+        RECT normalizedSelection = selectionRect_;
+        if (normalizedSelection.left > normalizedSelection.right) {
+            std::swap(normalizedSelection.left, normalizedSelection.right);
+        }
+        if (normalizedSelection.top > normalizedSelection.bottom) {
+            std::swap(normalizedSelection.top, normalizedSelection.bottom);
+        }
+
+        const int selectionWidth =
+            std::max(1, static_cast<int>(normalizedSelection.right - normalizedSelection.left));
+        const int selectionHeight =
+            std::max(1, static_cast<int>(normalizedSelection.bottom - normalizedSelection.top));
+        const int selectionOffsetX = normalizedSelection.left - virtualDesktopRect_.left;
+        const int selectionOffsetY = normalizedSelection.top - virtualDesktopRect_.top;
+
+        HRGN selectionRegion = CreateRectRgn(
+            selectionOffsetX,
+            selectionOffsetY,
+            selectionOffsetX + selectionWidth + 1,
+            selectionOffsetY + selectionHeight + 1);
+        if (selectionRegion != nullptr) {
+            HRGN unionRegion = CreateRectRgn(0, 0, 0, 0);
+            if (unionRegion != nullptr) {
+                const int combineResult = CombineRgn(unionRegion, region, selectionRegion, RGN_OR);
+                if (combineResult != ERROR) {
+                    DeleteObject(region);
+                    region = unionRegion;
+                } else {
+                    DeleteObject(unionRegion);
+                }
+            }
+            DeleteObject(selectionRegion);
+        }
+    }
+
+    if (selectionConfirmVisible_) {
+        const RECT confirmRect = BuildConfirmRect();
+        HRGN confirmRegion = CreateRoundRectRgn(
+            confirmRect.left,
+            confirmRect.top,
+            confirmRect.right + 1,
+            confirmRect.bottom + 1,
+            14,
+            14);
+        if (confirmRegion != nullptr) {
+            HRGN unionRegion = CreateRectRgn(0, 0, 0, 0);
+            if (unionRegion != nullptr) {
+                const int combineResult = CombineRgn(unionRegion, region, confirmRegion, RGN_OR);
+                if (combineResult != ERROR) {
+                    DeleteObject(region);
+                    region = unionRegion;
+                } else {
+                    DeleteObject(unionRegion);
+                }
+            }
+            DeleteObject(confirmRegion);
+        }
+    }
+
     if (SetWindowRgn(window_, region, TRUE) == 0) {
         DeleteObject(region);
         Infrastructure::Logger::Get().Error(
@@ -286,9 +490,10 @@ void OverlayWindow::ApplyRoundedRegion() {
         return;
     }
     Infrastructure::Logger::Get().Info(
-        L"[Overlay] ApplyRoundedRegion: offset=(" + std::to_wstring(offsetX) + L"," +
-        std::to_wstring(offsetY) + L"), size=" + std::to_wstring(width) +
-        L"x" + std::to_wstring(height));
+        L"[Overlay] ApplyRoundedRegion: fenceSize=" + std::to_wstring(fenceWidth) +
+        L"x" + std::to_wstring(fenceHeight) +
+        L"; selection=" + std::wstring(hasSelectionRect_ ? L"true" : L"false") +
+        L"; confirm=" + std::wstring(selectionConfirmVisible_ ? L"true" : L"false"));
 }
 
 void OverlayWindow::ApplyClickThroughStyle() {
@@ -297,7 +502,7 @@ void OverlayWindow::ApplyClickThroughStyle() {
     }
 
     LONG_PTR extendedStyle = GetWindowLongPtrW(window_, GWL_EXSTYLE);
-    if (fixedMode_) {
+    if (fixedMode_ && !selectionConfirmVisible_) {
         extendedStyle |= WS_EX_TRANSPARENT;
     } else {
         extendedStyle &= ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT);
@@ -384,37 +589,69 @@ void OverlayWindow::Paint(HWND hwnd) {
         offsetX + std::max(1, static_cast<int>(fenceRect_.right - fenceRect_.left)),
         offsetY + std::max(1, static_cast<int>(fenceRect_.bottom - fenceRect_.top))};
 
-    HBRUSH fillBrush = CreateSolidBrush(kFenceFillColor);
-    HPEN borderPen = CreatePen(PS_SOLID, kFenceBorderWidth, kFenceBorderColor);
-    HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
-    HGDIOBJ oldPen = SelectObject(hdc, borderPen);
+    if (!hasSelectionRect_) {
+        HBRUSH fillBrush = CreateSolidBrush(kFenceFillColor);
+        HPEN borderPen = CreatePen(PS_SOLID, kFenceBorderWidth, kFenceBorderColor);
+        HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
+        HGDIOBJ oldPen = SelectObject(hdc, borderPen);
 
-    RoundRect(
-        hdc,
-        localFenceRect.left,
-        localFenceRect.top,
-        localFenceRect.right,
-        localFenceRect.bottom,
-        kFenceCornerRadiusPixels * 2,
-        kFenceCornerRadiusPixels * 2);
+        RoundRect(
+            hdc,
+            localFenceRect.left,
+            localFenceRect.top,
+            localFenceRect.right,
+            localFenceRect.bottom,
+            kFenceCornerRadiusPixels * 2,
+            kFenceCornerRadiusPixels * 2);
 
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(borderPen);
-    DeleteObject(fillBrush);
+        SelectObject(hdc, oldPen);
+        SelectObject(hdc, oldBrush);
+        DeleteObject(borderPen);
+        DeleteObject(fillBrush);
 
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(255, 255, 255));
-    RECT titleRect{
-        localFenceRect.left + 12,
-        localFenceRect.top + 10,
-        localFenceRect.right - 12,
-        localFenceRect.top + 32};
-    DrawTextW(hdc, L"Desktop Group", -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(255, 255, 255));
+        RECT titleRect{
+            localFenceRect.left + 12,
+            localFenceRect.top + 10,
+            localFenceRect.right - 12,
+            localFenceRect.top + 32};
+        DrawTextW(hdc, L"Desktop Group", -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+
+    if (hasSelectionRect_) {
+        RECT localSelection{
+            selectionRect_.left - virtualDesktopRect_.left,
+            selectionRect_.top - virtualDesktopRect_.top,
+            selectionRect_.right - virtualDesktopRect_.left,
+            selectionRect_.bottom - virtualDesktopRect_.top};
+
+        HBRUSH selectionFill = CreateSolidBrush(kSelectionFillColor);
+        HPEN selectionBorder = CreatePen(PS_SOLID, kSelectionBorderWidth, kSelectionBorderColor);
+        HGDIOBJ oldSelectionBrush = SelectObject(hdc, selectionFill);
+        HGDIOBJ oldSelectionPen = SelectObject(hdc, selectionBorder);
+        Rectangle(
+            hdc,
+            localSelection.left,
+            localSelection.top,
+            localSelection.right,
+            localSelection.bottom);
+        SelectObject(hdc, oldSelectionPen);
+        SelectObject(hdc, oldSelectionBrush);
+        DeleteObject(selectionBorder);
+        DeleteObject(selectionFill);
+    }
+
+    if (selectionConfirmVisible_) {
+        DrawConfirmUI(hdc);
+    }
 
     EndPaint(hwnd, &paint);
 
-    const BYTE alpha = static_cast<BYTE>(fixedMode_ ? kFenceFillAlpha : (kFenceFillAlpha + 20));
+    BYTE alpha = static_cast<BYTE>(fixedMode_ ? kFenceFillAlpha : (kFenceFillAlpha + 20));
+    if (hasSelectionRect_) {
+        alpha = std::max(alpha, kSelectionOnlyAlpha);
+    }
     SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA);
 
     if (!paintLogged_) {
@@ -425,5 +662,160 @@ void OverlayWindow::Paint(HWND hwnd) {
             std::to_wstring(clientRect.bottom - clientRect.top) +
             L"; alpha=" + std::to_wstring(alpha));
     }
+}
+
+void OverlayWindow::NormalizeSelectionRect() {
+    if (selectionRect_.left > selectionRect_.right) {
+        std::swap(selectionRect_.left, selectionRect_.right);
+    }
+    if (selectionRect_.top > selectionRect_.bottom) {
+        std::swap(selectionRect_.top, selectionRect_.bottom);
+    }
+}
+
+RECT OverlayWindow::BuildConfirmRect() const {
+    POINT localAnchor{
+        selectionConfirmAnchor_.x - virtualDesktopRect_.left,
+        selectionConfirmAnchor_.y - virtualDesktopRect_.top};
+    RECT rect{
+        localAnchor.x + 12,
+        localAnchor.y + 12,
+        localAnchor.x + 12 + kConfirmPopupWidth,
+        localAnchor.y + 12 + kConfirmPopupHeight};
+
+    RECT clientRect{};
+    if (window_ != nullptr) {
+        GetClientRect(window_, &clientRect);
+    } else {
+        clientRect.right = std::max(1L, virtualDesktopRect_.right - virtualDesktopRect_.left);
+        clientRect.bottom = std::max(1L, virtualDesktopRect_.bottom - virtualDesktopRect_.top);
+    }
+
+    if (rect.right > clientRect.right) {
+        const int delta = rect.right - clientRect.right;
+        rect.left -= delta;
+        rect.right -= delta;
+    }
+    if (rect.left < 0) {
+        rect.right -= rect.left;
+        rect.left = 0;
+    }
+    if (rect.bottom > clientRect.bottom) {
+        const int delta = rect.bottom - clientRect.bottom;
+        rect.top -= delta;
+        rect.bottom -= delta;
+    }
+    if (rect.top < 0) {
+        rect.bottom -= rect.top;
+        rect.top = 0;
+    }
+    return rect;
+}
+
+RECT OverlayWindow::BuildConfirmButtonRect() const {
+    RECT rect = selectionConfirmRect_;
+    const int top = rect.top + (kConfirmPopupHeight - kConfirmButtonHeight) / 2;
+    return RECT{
+        rect.left + kConfirmPopupPadding,
+        top,
+        rect.left + kConfirmPopupPadding + kConfirmButtonWidth,
+        top + kConfirmButtonHeight};
+}
+
+RECT OverlayWindow::BuildCancelButtonRect() const {
+    RECT rect = selectionConfirmRect_;
+    const int top = rect.top + (kConfirmPopupHeight - kConfirmButtonHeight) / 2;
+    const int left = rect.left + kConfirmPopupPadding + kConfirmButtonWidth + kConfirmButtonGap;
+    return RECT{
+        left,
+        top,
+        left + kConfirmButtonWidth,
+        top + kConfirmButtonHeight};
+}
+
+void OverlayWindow::DrawConfirmUI(HDC hdc) const {
+    if (!selectionConfirmVisible_) {
+        return;
+    }
+
+    HBRUSH panelBrush = CreateSolidBrush(kConfirmPanelColor);
+    HPEN panelPen = CreatePen(PS_SOLID, 1, kConfirmPanelBorder);
+    HGDIOBJ oldBrush = SelectObject(hdc, panelBrush);
+    HGDIOBJ oldPen = SelectObject(hdc, panelPen);
+    RoundRect(
+        hdc,
+        selectionConfirmRect_.left,
+        selectionConfirmRect_.top,
+        selectionConfirmRect_.right,
+        selectionConfirmRect_.bottom,
+        14,
+        14);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(panelPen);
+    DeleteObject(panelBrush);
+
+    const RECT confirmButton = BuildConfirmButtonRect();
+    const bool confirmHover = selectionConfirmHoverAction_ == SelectionConfirmAction::Confirm;
+    HBRUSH confirmBrush = CreateSolidBrush(confirmHover ? kConfirmButtonHoverColor : kConfirmButtonColor);
+    HPEN confirmPen = CreatePen(PS_SOLID, 1, confirmHover ? kConfirmButtonHoverColor : kConfirmButtonColor);
+    oldBrush = SelectObject(hdc, confirmBrush);
+    oldPen = SelectObject(hdc, confirmPen);
+    RoundRect(
+        hdc,
+        confirmButton.left,
+        confirmButton.top,
+        confirmButton.right,
+        confirmButton.bottom,
+        10,
+        10);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(confirmPen);
+    DeleteObject(confirmBrush);
+
+    const RECT cancelButton = BuildCancelButtonRect();
+    const bool cancelHover = selectionConfirmHoverAction_ == SelectionConfirmAction::Cancel;
+    HBRUSH cancelBrush = CreateSolidBrush(cancelHover ? kCancelButtonHoverColor : kCancelButtonColor);
+    HPEN cancelPen = CreatePen(PS_SOLID, 1, cancelHover ? kCancelButtonHoverColor : kCancelButtonColor);
+    oldBrush = SelectObject(hdc, cancelBrush);
+    oldPen = SelectObject(hdc, cancelPen);
+    RoundRect(
+        hdc,
+        cancelButton.left,
+        cancelButton.top,
+        cancelButton.right,
+        cancelButton.bottom,
+        10,
+        10);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(cancelPen);
+    DeleteObject(cancelBrush);
+
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, kConfirmTextColor);
+    DrawTextW(hdc, L"\u786e\u5b9a\u7ed8\u5236", -1, const_cast<RECT*>(&confirmButton), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, L"\u53d6\u6d88\u7ed8\u5236", -1, const_cast<RECT*>(&cancelButton), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+OverlayWindow::SelectionConfirmAction OverlayWindow::HitTestConfirmAction(POINT localPoint) const {
+    if (!selectionConfirmVisible_) {
+        return SelectionConfirmAction::None;
+    }
+
+    RECT confirmButton = BuildConfirmButtonRect();
+    if (PtInRect(&confirmButton, localPoint) != FALSE) {
+        return SelectionConfirmAction::Confirm;
+    }
+    RECT cancelButton = BuildCancelButtonRect();
+    if (PtInRect(&cancelButton, localPoint) != FALSE) {
+        return SelectionConfirmAction::Cancel;
+    }
+    return SelectionConfirmAction::None;
+}
+
+void OverlayWindow::SetSelectionConfirmAction(SelectionConfirmAction action) {
+    selectionConfirmAction_ = action;
 }
 }  // namespace Overlay
