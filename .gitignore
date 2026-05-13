@@ -1,0 +1,8 @@
+build/
+out/
+dist/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+.vs/
