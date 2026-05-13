@@ -1,18 +1,20 @@
 #include "Resource.h"
 #include <windows.h>
 
+#pragma code_page(65001)
+
 IDI_APP_ICON ICON "app.ico"
 
 IDR_TRAY_MENU MENU
 BEGIN
     POPUP "TrayMenu"
     BEGIN
-        MENUITEM "Settings",          IDM_TRAY_SETTINGS
-        MENUITEM "Pin/Unpin",         IDM_TRAY_TOGGLE_PIN
-        MENUITEM "Pause",             IDM_TRAY_PAUSE
-        MENUITEM "Restore Layout",    IDM_TRAY_RESTORE_LAYOUT
+        MENUITEM L"主设置",          IDM_TRAY_SETTINGS
+        MENUITEM L"固定/取消固定",   IDM_TRAY_TOGGLE_PIN
+        MENUITEM L"暂停管理",        IDM_TRAY_PAUSE
+        MENUITEM L"恢复原始布局",    IDM_TRAY_RESTORE_LAYOUT
         MENUITEM SEPARATOR
-        MENUITEM "Exit",              IDM_TRAY_EXIT
+        MENUITEM L"退出",            IDM_TRAY_EXIT
     END
 END
 

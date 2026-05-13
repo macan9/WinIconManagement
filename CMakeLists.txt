@@ -11,6 +11,7 @@ add_executable(WinIconManagement WIN32
     src/main.cpp
     src/App/AppController.cpp
     src/App/SingleInstance.cpp
+    src/Tray/TrayIcon.cpp
     src/Infrastructure/Dpi.cpp
     src/Infrastructure/Logger.cpp
     src/Infrastructure/Paths.cpp
@@ -40,4 +41,3 @@ target_link_libraries(WinIconManagement PRIVATE
     shell32
     shlwapi
 )
-
