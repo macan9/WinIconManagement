@@ -85,8 +85,12 @@ void TrayIcon::Remove() {
 
 bool TrayIcon::HandleCallbackMessage(LPARAM lParam) {
     const UINT eventMessage = static_cast<UINT>(lParam);
-    if (eventMessage == WM_CONTEXTMENU || eventMessage == WM_RBUTTONUP || eventMessage == WM_LBUTTONUP) {
+    if (eventMessage == WM_CONTEXTMENU || eventMessage == WM_RBUTTONUP) {
         ShowContextMenu();
+        return true;
+    }
+    if (eventMessage == WM_LBUTTONUP || eventMessage == WM_LBUTTONDBLCLK) {
+        PostMessageW(ownerWindow_, WM_COMMAND, MAKEWPARAM(IDM_TRAY_SETTINGS, 0), 0);
         return true;
     }
     return false;

@@ -21,12 +21,19 @@ private:
     bool RegisterWindowClass();
     bool CreateMainWindow();
     bool InitializeTray();
+    void ShowMainWindow();
+    bool CreateDiagnosticsTextControl();
+    void LayoutDiagnosticsTextControl(int clientWidth, int clientHeight);
+    void UpdateDiagnosticsTextControl();
     void PaintMainWindow(HWND hwnd);
+    void LogDesktopResolveDiagnostics() const;
+    std::wstring BuildDesktopResolveStatusText() const;
     void ResolveDesktopWindows(bool fromManualReconnect);
     void UpdateWindowTitle();
 
     HINSTANCE instance_;
     HWND mainWindow_;
+    HWND diagnosticsTextControl_;
     Tray::TrayIcon trayIcon_;
     Desktop::DesktopWindowResolver desktopResolver_;
     Desktop::DesktopResolveResult desktopResolveResult_;

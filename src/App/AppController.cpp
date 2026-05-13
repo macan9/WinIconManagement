@@ -1,5 +1,7 @@
 #include "App/AppController.h"
 
+#include <cstdint>
+#include <sstream>
 #include <string>
 
 #include "Infrastructure/Logger.h"
@@ -10,12 +12,80 @@ constexpr wchar_t kMainWindowClassName[] = L"WinIconManagement.MainWindow";
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT_PTR kDesktopHealthTimerId = 1;
 constexpr UINT kDesktopHealthIntervalMs = 3000;
+
+std::wstring HandleToString(HWND handle) {
+    if (handle == nullptr) {
+        return L"0x0";
+    }
+    std::wstringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << reinterpret_cast<uintptr_t>(handle);
+    return stream.str();
+}
+
+std::wstring RectToString(const RECT& rect) {
+    std::wstringstream stream;
+    stream << L"["
+           << rect.left << L"," << rect.top << L"]-["
+           << rect.right << L"," << rect.bottom << L"]";
+    return stream.str();
+}
+
+struct DisplayDiagnostics {
+    int monitorCount = 0;
+    RECT virtualDesktopRect{0, 0, 0, 0};
+    std::wstring monitorDetails;
+};
+
+struct MonitorEnumContext {
+    int index = 0;
+    std::wstring lines;
+};
+
+BOOL CALLBACK EnumDisplayMonitorCallback(HMONITOR monitor, HDC, LPRECT, LPARAM parameter) {
+    auto* context = reinterpret_cast<MonitorEnumContext*>(parameter);
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return TRUE;
+    }
+
+    ++context->index;
+    context->lines += L"  ";
+    context->lines += std::to_wstring(context->index);
+    context->lines += L". ";
+    context->lines += info.szDevice;
+    context->lines += L" bounds=";
+    context->lines += RectToString(info.rcMonitor);
+    context->lines += L", work=";
+    context->lines += RectToString(info.rcWork);
+    context->lines += L", primary=";
+    context->lines += (info.dwFlags & MONITORINFOF_PRIMARY) ? L"true" : L"false";
+    context->lines += L"\r\n";
+    return TRUE;
+}
+
+DisplayDiagnostics CollectDisplayDiagnostics() {
+    DisplayDiagnostics diagnostics{};
+    diagnostics.monitorCount = GetSystemMetrics(SM_CMONITORS);
+    diagnostics.virtualDesktopRect.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    diagnostics.virtualDesktopRect.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    diagnostics.virtualDesktopRect.right =
+        diagnostics.virtualDesktopRect.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    diagnostics.virtualDesktopRect.bottom =
+        diagnostics.virtualDesktopRect.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    MonitorEnumContext context{};
+    EnumDisplayMonitors(nullptr, nullptr, EnumDisplayMonitorCallback, reinterpret_cast<LPARAM>(&context));
+    diagnostics.monitorDetails = context.lines;
+    return diagnostics;
+}
 }
 
 namespace App {
 AppController::AppController(HINSTANCE instance)
     : instance_(instance),
       mainWindow_(nullptr),
+      diagnosticsTextControl_(nullptr),
       trayIcon_(),
       trayCallbackMessage_(kTrayCallbackMessage),
       taskbarCreatedMessage_(RegisterWindowMessageW(L"TaskbarCreated")),
@@ -111,7 +181,80 @@ bool AppController::CreateMainWindow() {
             L"CreateWindowExW failed. error=" + std::to_wstring(error));
         return false;
     }
+
+    if (!CreateDiagnosticsTextControl()) {
+        return false;
+    }
+
+    RECT clientRect{};
+    GetClientRect(mainWindow_, &clientRect);
+    LayoutDiagnosticsTextControl(clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
+    UpdateDiagnosticsTextControl();
     return true;
+}
+
+bool AppController::CreateDiagnosticsTextControl() {
+    diagnosticsTextControl_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"EDIT",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE |
+            ES_AUTOVSCROLL | ES_READONLY | ES_NOHIDESEL,
+        24,
+        106,
+        800,
+        460,
+        mainWindow_,
+        nullptr,
+        instance_,
+        nullptr);
+
+    if (diagnosticsTextControl_ == nullptr) {
+        const DWORD error = GetLastError();
+        Infrastructure::Logger::Get().Error(
+            L"CreateWindowExW(EDIT) failed. error=" + std::to_wstring(error));
+        return false;
+    }
+
+    SendMessageW(
+        diagnosticsTextControl_,
+        WM_SETFONT,
+        reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
+        TRUE);
+    return true;
+}
+
+void AppController::LayoutDiagnosticsTextControl(int clientWidth, int clientHeight) {
+    if (diagnosticsTextControl_ == nullptr || !IsWindow(diagnosticsTextControl_)) {
+        return;
+    }
+
+    const int left = 24;
+    const int top = 106;
+    const int rightPadding = 24;
+    const int bottomPadding = 24;
+    const int minWidth = 120;
+    const int minHeight = 80;
+
+    int width = clientWidth - left - rightPadding;
+    int height = clientHeight - top - bottomPadding;
+    if (width < minWidth) {
+        width = minWidth;
+    }
+    if (height < minHeight) {
+        height = minHeight;
+    }
+
+    MoveWindow(diagnosticsTextControl_, left, top, width, height, TRUE);
+}
+
+void AppController::UpdateDiagnosticsTextControl() {
+    if (diagnosticsTextControl_ == nullptr || !IsWindow(diagnosticsTextControl_)) {
+        return;
+    }
+
+    const std::wstring text = BuildDesktopResolveStatusText();
+    SetWindowTextW(diagnosticsTextControl_, text.c_str());
 }
 
 bool AppController::InitializeTray() {
@@ -126,6 +269,25 @@ bool AppController::InitializeTray() {
         return false;
     }
     return true;
+}
+
+void AppController::ShowMainWindow() {
+    if (mainWindow_ == nullptr || !IsWindow(mainWindow_)) {
+        return;
+    }
+
+    if (!IsWindowVisible(mainWindow_)) {
+        ShowWindow(mainWindow_, SW_SHOW);
+    }
+
+    if (IsIconic(mainWindow_)) {
+        ShowWindow(mainWindow_, SW_RESTORE);
+    } else {
+        ShowWindow(mainWindow_, SW_SHOW);
+    }
+
+    SetForegroundWindow(mainWindow_);
+    BringWindowToTop(mainWindow_);
 }
 
 LRESULT CALLBACK AppController::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -158,6 +320,9 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
     switch (message) {
         case WM_COMMAND:
             HandleCommand(hwnd, LOWORD(wParam));
+            return 0;
+        case WM_SIZE:
+            LayoutDiagnosticsTextControl(LOWORD(lParam), HIWORD(lParam));
             return 0;
         case WM_TIMER:
             if (wParam == desktopHealthTimerId_) {
@@ -225,7 +390,7 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
     switch (commandId) {
         case IDM_TRAY_SETTINGS:
             Infrastructure::Logger::Get().Info(L"Tray command: Settings.");
-            MessageBoxW(hwnd, L"Settings window will be implemented in Stage 10.", L"WinIconManagement", MB_OK | MB_ICONINFORMATION);
+            ShowMainWindow();
             break;
         case IDM_TRAY_TOGGLE_PIN:
             isPinned_ = !isPinned_;
@@ -301,12 +466,6 @@ void AppController::PaintMainWindow(HWND hwnd) {
     RECT statusRect{44, 78, clientRect.right - 24, 98};
     DrawTextW(deviceContext, statusText, -1, &statusRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-    if (!isDesktopConnected_ && !desktopResolveResult_.failureStep.empty()) {
-        std::wstring detail = L"失败步骤: " + desktopResolveResult_.failureStep;
-        RECT detailRect{24, 106, clientRect.right - 24, 130};
-        DrawTextW(deviceContext, detail.c_str(), -1, &detailRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    }
-
     SelectObject(deviceContext, previousFont);
     EndPaint(hwnd, &paintStruct);
 }
@@ -316,12 +475,13 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
     isDesktopConnected_ = desktopResolveResult_.success &&
                           Desktop::DesktopWindowResolver::IsWindowChainValid(desktopResolveResult_);
 
+    LogDesktopResolveDiagnostics();
+
     if (isDesktopConnected_) {
-        Infrastructure::Logger::Get().Info(
-            L"Desktop resolve success. explorerPid=" + std::to_wstring(desktopResolveResult_.explorerProcessId));
         if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
             InvalidateRect(mainWindow_, nullptr, TRUE);
         }
+        UpdateDiagnosticsTextControl();
         return;
     }
 
@@ -341,5 +501,72 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
     if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
         InvalidateRect(mainWindow_, nullptr, TRUE);
     }
+    UpdateDiagnosticsTextControl();
+}
+
+void AppController::LogDesktopResolveDiagnostics() const {
+    std::wstring summary = L"[DesktopResolve] success=";
+    summary += isDesktopConnected_ ? L"true" : L"false";
+    summary += L"; path=" + desktopResolveResult_.resolvePath;
+    summary += L"; fallback=" + std::wstring(desktopResolveResult_.usedEnumWindowsFallback ? L"true" : L"false");
+    summary += L"; progman=" + HandleToString(desktopResolveResult_.progmanWindow);
+    summary += L"; worker=" + HandleToString(desktopResolveResult_.workerWindow);
+    summary += L"; defView=" + HandleToString(desktopResolveResult_.shellDefViewWindow);
+    summary += L"; listView=" + HandleToString(desktopResolveResult_.listViewWindow);
+    summary += L"; explorerPid=" + std::to_wstring(desktopResolveResult_.explorerProcessId);
+    summary += L"; progmanClass=" + desktopResolveResult_.progmanClassName;
+    summary += L"; workerClass=" + desktopResolveResult_.workerClassName;
+    summary += L"; defViewClass=" + desktopResolveResult_.shellDefViewClassName;
+    summary += L"; listViewClass=" + desktopResolveResult_.listViewClassName;
+    if (!desktopResolveResult_.failureStep.empty()) {
+        summary += L"; failureStep=" + desktopResolveResult_.failureStep;
+        summary += L"; failureCode=" + std::to_wstring(desktopResolveResult_.failureCode);
+    }
+
+    if (isDesktopConnected_) {
+        Infrastructure::Logger::Get().Info(summary);
+    } else {
+        Infrastructure::Logger::Get().Error(summary);
+    }
+}
+
+std::wstring AppController::BuildDesktopResolveStatusText() const {
+    std::wstring wrappedPath = desktopResolveResult_.resolvePath;
+    const std::wstring pathDelimiter = L" -> ";
+    const std::wstring wrappedDelimiter = L"\r\n  -> ";
+    size_t delimiterPosition = 0;
+    while ((delimiterPosition = wrappedPath.find(pathDelimiter, delimiterPosition)) != std::wstring::npos) {
+        wrappedPath.replace(delimiterPosition, pathDelimiter.size(), wrappedDelimiter);
+        delimiterPosition += wrappedDelimiter.size();
+    }
+
+    std::wstring text;
+    text += L"解析路径:\r\n";
+    text += L"  " + wrappedPath + L"\r\n";
+    text += L"Fallback: " + std::wstring(desktopResolveResult_.usedEnumWindowsFallback ? L"true" : L"false") + L"\r\n";
+    text += L"Progman: " + HandleToString(desktopResolveResult_.progmanWindow) +
+            L" (" + desktopResolveResult_.progmanClassName + L")\r\n";
+    text += L"WorkerW: " + HandleToString(desktopResolveResult_.workerWindow) +
+            L" (" + desktopResolveResult_.workerClassName + L")\r\n";
+    text += L"SHELLDLL_DefView: " + HandleToString(desktopResolveResult_.shellDefViewWindow) +
+            L" (" + desktopResolveResult_.shellDefViewClassName + L")\r\n";
+    text += L"SysListView32: " + HandleToString(desktopResolveResult_.listViewWindow) +
+            L" (" + desktopResolveResult_.listViewClassName + L")\r\n";
+    text += L"Explorer PID: " + std::to_wstring(desktopResolveResult_.explorerProcessId) + L"\r\n";
+    const DisplayDiagnostics display = CollectDisplayDiagnostics();
+    text += L"显示器数量: " + std::to_wstring(display.monitorCount) + L"\r\n";
+    text += L"虚拟桌面范围: " + RectToString(display.virtualDesktopRect) + L"\r\n";
+    if (!display.monitorDetails.empty()) {
+        text += L"显示器详情:\r\n" + display.monitorDetails;
+    }
+
+    if (!isDesktopConnected_) {
+        text += L"失败步骤: " +
+                (desktopResolveResult_.failureStep.empty() ? std::wstring(L"<unknown>") : desktopResolveResult_.failureStep) +
+                L"\r\n";
+        text += L"失败码: " + std::to_wstring(desktopResolveResult_.failureCode) + L"\r\n";
+    }
+
+    return text;
 }
 }  // namespace App
