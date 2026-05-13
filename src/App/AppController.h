@@ -2,6 +2,10 @@
 
 #include <windows.h>
 
+#include <string>
+#include <vector>
+
+#include "Desktop/DesktopIconService.h"
 #include "Desktop/DesktopWindowResolver.h"
 #include "Tray/TrayIcon.h"
 
@@ -27,8 +31,10 @@ private:
     void UpdateDiagnosticsTextControl();
     void PaintMainWindow(HWND hwnd);
     void LogDesktopResolveDiagnostics() const;
+    void LogDesktopIconDiagnostics() const;
     std::wstring BuildDesktopResolveStatusText() const;
     void ResolveDesktopWindows(bool fromManualReconnect);
+    void RefreshDesktopIconSnapshot();
     void UpdateWindowTitle();
 
     HINSTANCE instance_;
@@ -36,7 +42,11 @@ private:
     HWND diagnosticsTextControl_;
     Tray::TrayIcon trayIcon_;
     Desktop::DesktopWindowResolver desktopResolver_;
+    Desktop::DesktopIconService desktopIconService_;
     Desktop::DesktopResolveResult desktopResolveResult_;
+    int desktopIconCount_;
+    std::vector<Desktop::DesktopIcon> desktopIcons_;
+    std::wstring desktopIconReadStatus_;
     UINT trayCallbackMessage_;
     UINT taskbarCreatedMessage_;
     UINT_PTR desktopHealthTimerId_;

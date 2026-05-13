@@ -1,5 +1,6 @@
 #include "App/AppController.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -27,6 +28,12 @@ std::wstring RectToString(const RECT& rect) {
     stream << L"["
            << rect.left << L"," << rect.top << L"]-["
            << rect.right << L"," << rect.bottom << L"]";
+    return stream.str();
+}
+
+std::wstring PointToString(const POINT& point) {
+    std::wstringstream stream;
+    stream << L"(" << point.x << L"," << point.y << L")";
     return stream.str();
 }
 
@@ -87,6 +94,8 @@ AppController::AppController(HINSTANCE instance)
       mainWindow_(nullptr),
       diagnosticsTextControl_(nullptr),
       trayIcon_(),
+      desktopIconCount_(0),
+      desktopIconReadStatus_(L"Not started."),
       trayCallbackMessage_(kTrayCallbackMessage),
       taskbarCreatedMessage_(RegisterWindowMessageW(L"TaskbarCreated")),
       desktopHealthTimerId_(kDesktopHealthTimerId),
@@ -478,12 +487,17 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
     LogDesktopResolveDiagnostics();
 
     if (isDesktopConnected_) {
+        RefreshDesktopIconSnapshot();
         if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
             InvalidateRect(mainWindow_, nullptr, TRUE);
         }
         UpdateDiagnosticsTextControl();
         return;
     }
+
+    desktopIconCount_ = 0;
+    desktopIcons_.clear();
+    desktopIconReadStatus_ = L"Desktop not connected.";
 
     std::wstring message = L"Desktop resolve failed at ";
     message += desktopResolveResult_.failureStep.empty() ? L"<unknown>" : desktopResolveResult_.failureStep;
@@ -502,6 +516,26 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
         InvalidateRect(mainWindow_, nullptr, TRUE);
     }
     UpdateDiagnosticsTextControl();
+}
+
+void AppController::RefreshDesktopIconSnapshot() {
+    desktopIconCount_ = desktopIconService_.GetDesktopIconCount(desktopResolveResult_.listViewWindow);
+    desktopIcons_ = desktopIconService_.EnumerateDesktopIcons(
+        desktopResolveResult_.listViewWindow,
+        desktopResolveResult_.explorerProcessId);
+
+    if (desktopIconCount_ <= 0) {
+        desktopIconReadStatus_ = L"No desktop icons found.";
+    } else if (desktopIcons_.empty()) {
+        desktopIconReadStatus_ = L"Read failed: no icon details returned.";
+    } else if (desktopIcons_.size() == static_cast<size_t>(desktopIconCount_)) {
+        desktopIconReadStatus_ = L"Read completed.";
+    } else {
+        desktopIconReadStatus_ = L"Partial read: " + std::to_wstring(desktopIcons_.size()) +
+                                 L"/" + std::to_wstring(desktopIconCount_);
+    }
+
+    LogDesktopIconDiagnostics();
 }
 
 void AppController::LogDesktopResolveDiagnostics() const {
@@ -527,6 +561,23 @@ void AppController::LogDesktopResolveDiagnostics() const {
         Infrastructure::Logger::Get().Info(summary);
     } else {
         Infrastructure::Logger::Get().Error(summary);
+    }
+}
+
+void AppController::LogDesktopIconDiagnostics() const {
+    std::wstring summary = L"[DesktopIcons] expectedCount=" + std::to_wstring(desktopIconCount_);
+    summary += L"; readCount=" + std::to_wstring(desktopIcons_.size());
+    summary += L"; status=" + desktopIconReadStatus_;
+    Infrastructure::Logger::Get().Info(summary);
+
+    const size_t sampleCount = std::min<size_t>(desktopIcons_.size(), 10);
+    for (size_t i = 0; i < sampleCount; ++i) {
+        const Desktop::DesktopIcon& icon = desktopIcons_[i];
+        std::wstring line = L"[DesktopIcons] sample index=" + std::to_wstring(icon.index);
+        line += L"; hasName=" + std::wstring(icon.displayName.empty() ? L"false" : L"true");
+        line += L"; nameLength=" + std::to_wstring(icon.displayName.size());
+        line += L"; position=" + PointToString(icon.position);
+        Infrastructure::Logger::Get().Info(line);
     }
 }
 
@@ -558,6 +609,20 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
     text += L"虚拟桌面范围: " + RectToString(display.virtualDesktopRect) + L"\r\n";
     if (!display.monitorDetails.empty()) {
         text += L"显示器详情:\r\n" + display.monitorDetails;
+    }
+
+    text += L"\r\n桌面图标预期数: " + std::to_wstring(desktopIconCount_) + L"\r\n";
+    text += L"桌面图标读取数: " + std::to_wstring(desktopIcons_.size()) + L"\r\n";
+    text += L"图标读取状态: " + desktopIconReadStatus_ + L"\r\n";
+    if (!desktopIcons_.empty()) {
+        text += L"图标样例:\r\n";
+        const size_t sampleCount = std::min<size_t>(desktopIcons_.size(), 10);
+        for (size_t i = 0; i < sampleCount; ++i) {
+            const Desktop::DesktopIcon& icon = desktopIcons_[i];
+            text += L"  [" + std::to_wstring(icon.index) + L"] ";
+            text += icon.displayName.empty() ? L"<empty>" : icon.displayName;
+            text += L" @ " + PointToString(icon.position) + L"\r\n";
+        }
     }
 
     if (!isDesktopConnected_) {
