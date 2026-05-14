@@ -27,7 +27,7 @@ MouseController::MouseController()
     : hook_(nullptr),
       desktopListViewWindow_(nullptr),
       enabled_(false),
-      rightButtonDown_(false),
+      leftButtonDown_(false),
       selectionActive_(false),
       downPoint_{0, 0},
       lastPoint_{0, 0} {}
@@ -71,11 +71,21 @@ void MouseController::Stop() {
 }
 
 void MouseController::SetEnabled(bool enabled) {
+    if (enabled_ == enabled) {
+        return;
+    }
+
     enabled_ = enabled;
     Infrastructure::Logger::Get().Info(
         L"[Selection] mouse controller enabled=" + std::wstring(enabled_ ? L"true" : L"false"));
-    if (!enabled_) {
+    if (enabled_) {
+        if (!Start()) {
+            enabled_ = false;
+            Infrastructure::Logger::Get().Error(L"[Selection] failed to enable mouse controller hook.");
+        }
+    } else {
         ResetDragState();
+        Stop();
     }
 }
 
@@ -100,6 +110,10 @@ void MouseController::SetCallbacks(
 
 void MouseController::SetMouseEventFilterCallback(MouseEventFilterCallback onFilter) {
     onMouseEventFilter_ = std::move(onFilter);
+}
+
+void MouseController::SetSelectionStartFilterCallback(SelectionStartFilterCallback onFilter) {
+    selectionStartFilter_ = std::move(onFilter);
 }
 
 LRESULT CALLBACK MouseController::HookProc(int code, WPARAM wParam, LPARAM lParam) {
@@ -136,18 +150,24 @@ bool MouseController::IsPointOnDesktop(POINT screenPoint) const {
     return false;
 }
 
-void MouseController::OpenDesktopContextMenu(POINT screenPoint) const {
+void MouseController::ClickDesktopBackground(POINT screenPoint) const {
     if (desktopListViewWindow_ == nullptr || !IsWindow(desktopListViewWindow_)) {
         return;
     }
 
-    LPARAM position = MAKELPARAM(static_cast<SHORT>(screenPoint.x), static_cast<SHORT>(screenPoint.y));
-    SendMessageW(desktopListViewWindow_, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(desktopListViewWindow_), position);
+    POINT clientPoint = screenPoint;
+    if (ScreenToClient(desktopListViewWindow_, &clientPoint) == FALSE) {
+        return;
+    }
+
+    const LPARAM position = MAKELPARAM(static_cast<SHORT>(clientPoint.x), static_cast<SHORT>(clientPoint.y));
+    PostMessageW(desktopListViewWindow_, WM_LBUTTONDOWN, MK_LBUTTON, position);
+    PostMessageW(desktopListViewWindow_, WM_LBUTTONUP, 0, position);
 }
 
 void MouseController::ResetDragState() {
     const bool hadSelection = selectionActive_;
-    rightButtonDown_ = false;
+    leftButtonDown_ = false;
     selectionActive_ = false;
     if (hadSelection && onCanceled_) {
         onCanceled_();
@@ -165,17 +185,20 @@ bool MouseController::HandleMouseEvent(WPARAM wParam, const MSLLHOOKSTRUCT* data
     }
 
     switch (wParam) {
-        case WM_RBUTTONDOWN:
+        case WM_LBUTTONDOWN:
             if (!IsPointOnDesktop(point)) {
                 return false;
             }
-            rightButtonDown_ = true;
+            if (selectionStartFilter_ && !selectionStartFilter_(point)) {
+                return false;
+            }
+            leftButtonDown_ = true;
             selectionActive_ = false;
             downPoint_ = point;
             lastPoint_ = point;
             return true;
         case WM_MOUSEMOVE:
-            if (!rightButtonDown_) {
+            if (!leftButtonDown_) {
                 return false;
             }
             lastPoint_ = point;
@@ -186,22 +209,22 @@ bool MouseController::HandleMouseEvent(WPARAM wParam, const MSLLHOOKSTRUCT* data
                 UpdateSelectionRect(point);
             }
             return false;
-        case WM_RBUTTONUP:
-            if (!rightButtonDown_) {
+        case WM_LBUTTONUP:
+            if (!leftButtonDown_) {
                 return false;
             }
             {
-                const bool shouldConsume = selectionActive_;
+                const bool shouldApplyDesktopClick = !selectionActive_;
                 CompleteSelection(point);
-                if (!shouldConsume) {
-                    OpenDesktopContextMenu(point);
+                if (shouldApplyDesktopClick) {
+                    ClickDesktopBackground(point);
                 }
                 return true;
             }
-        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
         case WM_MBUTTONDOWN:
         case WM_MOUSEWHEEL:
-            if (rightButtonDown_) {
+            if (leftButtonDown_) {
                 ResetDragState();
             }
             return false;
@@ -235,7 +258,7 @@ void MouseController::UpdateSelectionRect(const POINT& currentPoint) {
 void MouseController::CompleteSelection(const POINT& releasePoint) {
     const bool active = selectionActive_;
     selectionActive_ = false;
-    rightButtonDown_ = false;
+    leftButtonDown_ = false;
 
     if (!active) {
         return;

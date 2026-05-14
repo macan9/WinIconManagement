@@ -51,6 +51,7 @@ private:
     void HandleSelectionUpdated(const RECT& selectionRect);
     void HandleSelectionCompleted(const RECT& selectionRect, const POINT& releasePoint);
     void HandleSelectionCanceled();
+    [[nodiscard]] bool ShouldStartSelectionAt(const POINT& point) const;
     bool HandleSelectionConfirmMouseFilter(WPARAM message, const POINT& point);
     void ConfirmSelectionRect(const RECT& selectionRect, const POINT& anchorPoint);
     void HandleSelectionConfirmDecision(bool confirmed);

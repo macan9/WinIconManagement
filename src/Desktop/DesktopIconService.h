@@ -29,5 +29,9 @@ public:
         DWORD explorerProcessId,
         const std::vector<DesktopIcon>& iconsToMove) const;
     [[nodiscard]] bool RefreshDesktopIcon(HWND listViewWindow, int iconIndex) const;
+    [[nodiscard]] int HitTestDesktopIcon(
+        HWND listViewWindow,
+        DWORD explorerProcessId,
+        POINT screenPoint) const;
 };
 }  // namespace Desktop

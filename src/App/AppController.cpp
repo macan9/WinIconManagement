@@ -410,9 +410,8 @@ bool AppController::Initialize() {
         [this](WPARAM message, const POINT& point) {
             return HandleSelectionConfirmMouseFilter(message, point);
         });
-    if (!mouseController_.Start()) {
-        Infrastructure::Logger::Get().Error(L"[Selection] failed to install mouse hook.");
-    }
+    mouseController_.SetSelectionStartFilterCallback(
+        [this](const POINT& point) { return ShouldStartSelectionAt(point); });
 
     ResolveDesktopWindows(false);
     if (SetTimer(mainWindow_, desktopHealthTimerId_, desktopHealthIntervalMs_, nullptr) == 0) {
@@ -1310,6 +1309,20 @@ void AppController::HandleSelectionCanceled() {
     }
     Infrastructure::Logger::Get().Info(L"[Selection] canceled.");
     PostMessageW(mainWindow_, WM_APP + 103, 0, 0);
+}
+
+bool AppController::ShouldStartSelectionAt(const POINT& point) const {
+    if (!isDesktopConnected_ ||
+        desktopResolveResult_.listViewWindow == nullptr ||
+        !IsWindow(desktopResolveResult_.listViewWindow) ||
+        desktopResolveResult_.explorerProcessId == 0) {
+        return false;
+    }
+
+    return desktopIconService_.HitTestDesktopIcon(
+               desktopResolveResult_.listViewWindow,
+               desktopResolveResult_.explorerProcessId,
+               point) == -1;
 }
 
 bool AppController::HandleSelectionConfirmMouseFilter(WPARAM message, const POINT& point) {

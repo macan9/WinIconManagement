@@ -13,6 +13,7 @@ constexpr DWORD kListViewSendTimeoutMs = 1000;
 constexpr SIZE_T kIconTextMaxChars = 512;
 constexpr int kMinDesktopCoordinate = -32768;
 constexpr int kMaxDesktopCoordinate = 32767;
+constexpr int kDesktopHitTestUnavailable = -2;
 
 bool SendListViewMessage(
     HWND listViewWindow,
@@ -331,7 +332,8 @@ bool DesktopIconService::SetDesktopIconPosition(
         return false;
     }
 
-    RefreshDesktopIcon(listViewWindow, iconIndex);
+    const bool refreshed = RefreshDesktopIcon(listViewWindow, iconIndex);
+    (void)refreshed;
     return true;
 }
 
@@ -365,7 +367,8 @@ int DesktopIconService::MoveDesktopIcons(
     int successCount = 0;
     for (const DesktopIcon& icon : iconsToMove) {
         if (SetDesktopIconPositionCore(listViewWindow, icon.index, icon.position, remotePointBuffer)) {
-            RefreshDesktopIcon(listViewWindow, icon.index);
+            const bool refreshed = RefreshDesktopIcon(listViewWindow, icon.index);
+            (void)refreshed;
             ++successCount;
         }
     }
@@ -384,5 +387,58 @@ bool DesktopIconService::RefreshDesktopIcon(HWND listViewWindow, int iconIndex) 
         static_cast<WPARAM>(iconIndex),
         0,
         &messageResult);
+}
+
+int DesktopIconService::HitTestDesktopIcon(
+    HWND listViewWindow,
+    DWORD explorerProcessId,
+    POINT screenPoint) const {
+    if (listViewWindow == nullptr || !IsWindow(listViewWindow) || explorerProcessId == 0) {
+        return kDesktopHitTestUnavailable;
+    }
+
+    POINT clientPoint = screenPoint;
+    if (ScreenToClient(listViewWindow, &clientPoint) == FALSE) {
+        return kDesktopHitTestUnavailable;
+    }
+
+    RECT clientRect{};
+    if (GetClientRect(listViewWindow, &clientRect) == FALSE || PtInRect(&clientRect, clientPoint) == FALSE) {
+        return -1;
+    }
+
+    Infrastructure::UniqueKernelHandle explorerProcess(OpenProcess(
+        PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION,
+        FALSE,
+        explorerProcessId));
+    if (!explorerProcess.IsValid()) {
+        return kDesktopHitTestUnavailable;
+    }
+
+    RemoteBuffer remoteHitTestBuffer(explorerProcess.Get(), sizeof(LVHITTESTINFO));
+    if (!remoteHitTestBuffer.IsValid()) {
+        return kDesktopHitTestUnavailable;
+    }
+
+    LVHITTESTINFO hitTestInfo{};
+    hitTestInfo.pt = clientPoint;
+    if (!remoteHitTestBuffer.WriteObject(hitTestInfo)) {
+        return kDesktopHitTestUnavailable;
+    }
+
+    DWORD_PTR hitIndex = static_cast<DWORD_PTR>(-1);
+    if (!SendListViewMessage(
+            listViewWindow,
+            LVM_HITTEST,
+            0,
+            reinterpret_cast<LPARAM>(remoteHitTestBuffer.Get()),
+            &hitIndex)) {
+        return kDesktopHitTestUnavailable;
+    }
+
+    if (hitIndex > static_cast<DWORD_PTR>(std::numeric_limits<int>::max())) {
+        return kDesktopHitTestUnavailable;
+    }
+    return static_cast<int>(hitIndex);
 }
 }  // namespace Desktop

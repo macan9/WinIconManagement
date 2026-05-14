@@ -8,6 +8,7 @@ namespace Interaction {
 class MouseController {
 public:
     using MouseEventFilterCallback = std::function<bool(WPARAM, const POINT&)>;
+    using SelectionStartFilterCallback = std::function<bool(const POINT&)>;
     using SelectionStartedCallback = std::function<void(const POINT&)>;
     using SelectionUpdatedCallback = std::function<void(const RECT&)>;
     using SelectionCompletedCallback = std::function<void(const RECT&, const POINT&)>;
@@ -30,12 +31,13 @@ public:
         SelectionCompletedCallback onCompleted,
         SelectionCanceledCallback onCanceled);
     void SetMouseEventFilterCallback(MouseEventFilterCallback onFilter);
+    void SetSelectionStartFilterCallback(SelectionStartFilterCallback onFilter);
 
 private:
     static LRESULT CALLBACK HookProc(int code, WPARAM wParam, LPARAM lParam);
 
     [[nodiscard]] bool IsPointOnDesktop(POINT screenPoint) const;
-    void OpenDesktopContextMenu(POINT screenPoint) const;
+    void ClickDesktopBackground(POINT screenPoint) const;
     void ResetDragState();
     [[nodiscard]] bool HandleMouseEvent(WPARAM wParam, const MSLLHOOKSTRUCT* data);
     void MaybePromoteToSelection(const POINT& currentPoint);
@@ -45,7 +47,7 @@ private:
     HHOOK hook_;
     HWND desktopListViewWindow_;
     bool enabled_;
-    bool rightButtonDown_;
+    bool leftButtonDown_;
     bool selectionActive_;
     POINT downPoint_;
     POINT lastPoint_;
@@ -55,5 +57,6 @@ private:
     SelectionCompletedCallback onCompleted_;
     SelectionCanceledCallback onCanceled_;
     MouseEventFilterCallback onMouseEventFilter_;
+    SelectionStartFilterCallback selectionStartFilter_;
 };
 }  // namespace Interaction
