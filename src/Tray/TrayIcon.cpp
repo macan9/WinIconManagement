@@ -174,10 +174,15 @@ void TrayIcon::UpdateMenuState() {
         IDM_TRAY_TOGGLE_PIN,
         pinToggleText);
 
-    CheckMenuItem(
+    const wchar_t* fixedToggleText = isPaused_ ? L"取消固定控制" : L"固定控制";
+    ModifyMenuW(
         popupMenu,
         IDM_TRAY_PAUSE,
-        MF_BYCOMMAND | (isPaused_ ? MF_CHECKED : MF_UNCHECKED));
+        MF_BYCOMMAND | MF_STRING,
+        IDM_TRAY_PAUSE,
+        fixedToggleText);
+
+    CheckMenuItem(popupMenu, IDM_TRAY_PAUSE, MF_BYCOMMAND | MF_UNCHECKED);
 }
 
 HICON TrayIcon::LoadAppIcon() const {

@@ -36,10 +36,16 @@ constexpr COLORREF kConfirmButtonHoverColor = RGB(63, 122, 227);
 constexpr COLORREF kCancelButtonColor = RGB(67, 76, 93);
 constexpr COLORREF kCancelButtonHoverColor = RGB(88, 99, 120);
 constexpr COLORREF kConfirmTextColor = RGB(238, 244, 255);
-constexpr int kActiveFenceResizeHandleSize = 16;
-constexpr int kActiveFenceResizeHandleMargin = 6;
+constexpr int kActiveFenceResizeHandleSize = 28;
+constexpr int kActiveFenceResizeHandleMargin = 0;
 constexpr COLORREF kActiveFenceResizeHandleColor = RGB(236, 253, 245);
 constexpr COLORREF kActiveFenceResizeHandleBorderColor = RGB(22, 163, 74);
+constexpr int kActiveFenceDeleteButtonSize = 20;
+constexpr int kActiveFenceDeleteButtonMargin = 6;
+constexpr int kActiveFenceMoveAreaHeight = 4096;
+constexpr COLORREF kActiveFenceDeleteButtonColor = RGB(239, 68, 68);
+constexpr COLORREF kActiveFenceDeleteButtonHoverColor = RGB(220, 38, 38);
+constexpr COLORREF kActiveFenceDeleteGlyphColor = RGB(255, 255, 255);
 constexpr int kOverlayMinimumFenceWidth = 120;
 constexpr int kOverlayMinimumFenceHeight = 80;
 }
@@ -65,10 +71,10 @@ OverlayWindow::OverlayWindow()
       fixedMode_(true),
       visible_(false),
       paintLogged_(false),
-      resizeHandleHovered_(false),
-      activeFenceResizeInProgress_(false),
-      activeFenceResizeStartPoint_{0, 0},
-      activeFenceResizeStartRect_{0, 0, 0, 0} {}
+      hoverHitTarget_(InteractionHitTarget::Transparent),
+      activeFenceDragMode_(ActiveFenceDragMode::None),
+      activeFenceDragStartPoint_{0, 0},
+      activeFenceDragStartRect_{0, 0, 0, 0} {}
 
 OverlayWindow::~OverlayWindow() {
     Destroy();
@@ -242,7 +248,7 @@ void OverlayWindow::ClearSelectionRect() {
     selectionConfirmHoverAction_ = SelectionConfirmAction::None;
     selectionRect_ = RECT{0, 0, 0, 0};
     selectionConfirmRect_ = RECT{0, 0, 0, 0};
-    resizeHandleHovered_ = false;
+    hoverHitTarget_ = InteractionHitTarget::Transparent;
     if (IsInitialized()) {
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
@@ -259,7 +265,7 @@ void OverlayWindow::ShowSelectionConfirm(const RECT& selectionRect, const POINT&
     selectionConfirmRect_ = BuildConfirmRect();
     selectionConfirmAction_ = SelectionConfirmAction::None;
     selectionConfirmHoverAction_ = SelectionConfirmAction::None;
-    resizeHandleHovered_ = false;
+    hoverHitTarget_ = InteractionHitTarget::Transparent;
     if (IsInitialized()) {
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
@@ -275,7 +281,7 @@ void OverlayWindow::HideSelectionConfirm() {
     selectionConfirmAction_ = SelectionConfirmAction::None;
     selectionConfirmHoverAction_ = SelectionConfirmAction::None;
     selectionConfirmRect_ = RECT{0, 0, 0, 0};
-    resizeHandleHovered_ = false;
+    hoverHitTarget_ = InteractionHitTarget::Transparent;
     if (IsInitialized()) {
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
@@ -343,14 +349,6 @@ void OverlayWindow::SetSelectionConfirmCallback(SelectionConfirmCallback onSelec
     onSelectionConfirm_ = std::move(onSelectionConfirm);
 }
 
-bool OverlayWindow::IsActiveFenceResizeInProgress() const {
-    return activeFenceResizeInProgress_;
-}
-
-bool OverlayWindow::IsPointInActiveFenceResizeHandle(POINT screenPoint) const {
-    return HitTestInteractiveTarget(screenPoint) == InteractionHitTarget::ActiveFenceResizeHandle;
-}
-
 bool OverlayWindow::HandleActiveFenceResizeMouse(WPARAM message, POINT screenPoint) {
     if (fixedMode_ || selectionConfirmVisible_) {
         return false;
@@ -358,30 +356,40 @@ bool OverlayWindow::HandleActiveFenceResizeMouse(WPARAM message, POINT screenPoi
 
     switch (message) {
         case WM_MOUSEMOVE:
-            if (activeFenceResizeInProgress_) {
-                UpdateActiveFenceResize(screenPoint);
+            if (activeFenceDragMode_ != ActiveFenceDragMode::None) {
+                UpdateActiveFenceInteraction(screenPoint);
                 return true;
             }
-            UpdateResizeHoverState(screenPoint);
+            UpdateInteractionHoverState(screenPoint);
             return false;
         case WM_LBUTTONDOWN:
-            if (!IsPointInActiveFenceResizeHandle(screenPoint)) {
-                return false;
+            switch (HitTestInteractiveTarget(screenPoint)) {
+                case InteractionHitTarget::ActiveFenceResizeHandle:
+                    BeginActiveFenceInteraction(screenPoint, ActiveFenceDragMode::Resize);
+                    return true;
+                case InteractionHitTarget::ActiveFenceMoveArea:
+                    BeginActiveFenceInteraction(screenPoint, ActiveFenceDragMode::Move);
+                    return true;
+                case InteractionHitTarget::ActiveFenceDeleteButton:
+                    if (onActiveFenceDelete_) {
+                        onActiveFenceDelete_();
+                    }
+                    return true;
+                default:
+                    return false;
             }
-            BeginActiveFenceResize(screenPoint);
-            return true;
         case WM_LBUTTONUP:
-            if (!activeFenceResizeInProgress_) {
+            if (activeFenceDragMode_ == ActiveFenceDragMode::None) {
                 return false;
             }
-            FinishActiveFenceResize(true);
+            FinishActiveFenceInteraction(true);
             return true;
         case WM_RBUTTONDOWN:
         case WM_MBUTTONDOWN:
-            if (!activeFenceResizeInProgress_) {
+            if (activeFenceDragMode_ == ActiveFenceDragMode::None) {
                 return false;
             }
-            FinishActiveFenceResize(false);
+            FinishActiveFenceInteraction(false);
             return true;
         default:
             return false;
@@ -390,6 +398,10 @@ bool OverlayWindow::HandleActiveFenceResizeMouse(WPARAM message, POINT screenPoi
 
 void OverlayWindow::SetActiveFenceResizeCallback(ActiveFenceResizeCallback onActiveFenceResize) {
     onActiveFenceResize_ = std::move(onActiveFenceResize);
+}
+
+void OverlayWindow::SetActiveFenceDeleteCallback(ActiveFenceDeleteCallback onActiveFenceDelete) {
+    onActiveFenceDelete_ = std::move(onActiveFenceDelete);
 }
 
 LRESULT CALLBACK OverlayWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -410,30 +422,8 @@ LRESULT CALLBACK OverlayWindow::WindowProc(HWND hwnd, UINT message, WPARAM wPara
 
 LRESULT OverlayWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
-        case WM_NCHITTEST: {
-            const POINT screenPoint{
-                GET_X_LPARAM(lParam),
-                GET_Y_LPARAM(lParam)};
-            const InteractionHitTarget hitTarget = HitTestInteractiveTarget(screenPoint);
-            if (hitTarget == InteractionHitTarget::SelectionConfirm) {
-                return HTCLIENT;
-            }
-            if (hitTarget == InteractionHitTarget::ActiveFenceResizeHandle) {
-                return HTBOTTOMRIGHT;
-            }
+        case WM_NCHITTEST:
             return HTTRANSPARENT;
-        }
-        case WM_SETCURSOR:
-            if (!fixedMode_ && !selectionConfirmVisible_ && resizeHandleHovered_) {
-                SetCursor(LoadCursorW(nullptr, IDC_SIZENWSE));
-                return TRUE;
-            }
-            return DefWindowProcW(hwnd, message, wParam, lParam);
-        case WM_CAPTURECHANGED:
-            if (activeFenceResizeInProgress_ && reinterpret_cast<HWND>(lParam) != hwnd) {
-                FinishActiveFenceResize(false);
-            }
-            return 0;
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT:
@@ -506,7 +496,7 @@ bool OverlayWindow::CreateOverlayWindow() {
     }
 
     const BYTE alpha = static_cast<BYTE>(fixedMode_ ? kFenceFillAlpha : (kFenceFillAlpha + 20));
-    if (!SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA)) {
+    if (!SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA | LWA_COLORKEY)) {
         Infrastructure::Logger::Get().Error(
             L"[Overlay] SetLayeredWindowAttributes failed. error=" + std::to_wstring(GetLastError()));
     }
@@ -523,124 +513,7 @@ void OverlayWindow::ApplyRoundedRegion() {
     if (!IsInitialized()) {
         return;
     }
-
     NormalizeFenceRects();
-
-    HRGN region = nullptr;
-    int fenceCountInRegion = 0;
-    for (const RECT& fenceRect : fenceRects_) {
-        const int fenceOffsetX = fenceRect.left - virtualDesktopRect_.left;
-        const int fenceOffsetY = fenceRect.top - virtualDesktopRect_.top;
-        const int fenceWidth = std::max(1, static_cast<int>(fenceRect.right - fenceRect.left));
-        const int fenceHeight = std::max(1, static_cast<int>(fenceRect.bottom - fenceRect.top));
-
-        HRGN fenceRegion = CreateRoundRectRgn(
-            fenceOffsetX,
-            fenceOffsetY,
-            fenceOffsetX + fenceWidth + 1,
-            fenceOffsetY + fenceHeight + 1,
-            kFenceCornerRadiusPixels * 2,
-            kFenceCornerRadiusPixels * 2);
-        if (fenceRegion == nullptr) {
-            continue;
-        }
-
-        if (region == nullptr) {
-            region = fenceRegion;
-        } else {
-            HRGN unionRegion = CreateRectRgn(0, 0, 0, 0);
-            if (unionRegion != nullptr) {
-                const int combineResult = CombineRgn(unionRegion, region, fenceRegion, RGN_OR);
-                if (combineResult != ERROR) {
-                    DeleteObject(region);
-                    region = unionRegion;
-                } else {
-                    DeleteObject(unionRegion);
-                }
-            }
-            DeleteObject(fenceRegion);
-        }
-        ++fenceCountInRegion;
-    }
-
-    if (region == nullptr) {
-        region = CreateRectRgn(0, 0, 0, 0);
-    }
-    if (region == nullptr) {
-        Infrastructure::Logger::Get().Error(L"[Overlay] failed to create base region.");
-        return;
-    }
-
-    if (hasSelectionRect_) {
-        RECT normalizedSelection = selectionRect_;
-        if (normalizedSelection.left > normalizedSelection.right) {
-            std::swap(normalizedSelection.left, normalizedSelection.right);
-        }
-        if (normalizedSelection.top > normalizedSelection.bottom) {
-            std::swap(normalizedSelection.top, normalizedSelection.bottom);
-        }
-
-        const int selectionWidth =
-            std::max(1, static_cast<int>(normalizedSelection.right - normalizedSelection.left));
-        const int selectionHeight =
-            std::max(1, static_cast<int>(normalizedSelection.bottom - normalizedSelection.top));
-        const int selectionOffsetX = normalizedSelection.left - virtualDesktopRect_.left;
-        const int selectionOffsetY = normalizedSelection.top - virtualDesktopRect_.top;
-
-        HRGN selectionRegion = CreateRectRgn(
-            selectionOffsetX,
-            selectionOffsetY,
-            selectionOffsetX + selectionWidth + 1,
-            selectionOffsetY + selectionHeight + 1);
-        if (selectionRegion != nullptr) {
-            HRGN unionRegion = CreateRectRgn(0, 0, 0, 0);
-            if (unionRegion != nullptr) {
-                const int combineResult = CombineRgn(unionRegion, region, selectionRegion, RGN_OR);
-                if (combineResult != ERROR) {
-                    DeleteObject(region);
-                    region = unionRegion;
-                } else {
-                    DeleteObject(unionRegion);
-                }
-            }
-            DeleteObject(selectionRegion);
-        }
-    }
-
-    if (selectionConfirmVisible_) {
-        const RECT confirmRect = BuildConfirmRect();
-        HRGN confirmRegion = CreateRoundRectRgn(
-            confirmRect.left,
-            confirmRect.top,
-            confirmRect.right + 1,
-            confirmRect.bottom + 1,
-            14,
-            14);
-        if (confirmRegion != nullptr) {
-            HRGN unionRegion = CreateRectRgn(0, 0, 0, 0);
-            if (unionRegion != nullptr) {
-                const int combineResult = CombineRgn(unionRegion, region, confirmRegion, RGN_OR);
-                if (combineResult != ERROR) {
-                    DeleteObject(region);
-                    region = unionRegion;
-                } else {
-                    DeleteObject(unionRegion);
-                }
-            }
-            DeleteObject(confirmRegion);
-        }
-    }
-
-    if (SetWindowRgn(window_, region, TRUE) == 0) {
-        DeleteObject(region);
-        Infrastructure::Logger::Get().Error(
-            L"[Overlay] SetWindowRgn failed. error=" + std::to_wstring(GetLastError()));
-        return;
-    }
-    Infrastructure::Logger::Get().Info(
-        L"[Overlay] ApplyRoundedRegion: fenceCount=" + std::to_wstring(fenceCountInRegion) +
-        L"; selection=" + std::wstring(hasSelectionRect_ ? L"true" : L"false") +
-        L"; confirm=" + std::wstring(selectionConfirmVisible_ ? L"true" : L"false"));
 }
 
 void OverlayWindow::ApplyClickThroughStyle() {
@@ -649,11 +522,7 @@ void OverlayWindow::ApplyClickThroughStyle() {
     }
 
     LONG_PTR extendedStyle = GetWindowLongPtrW(window_, GWL_EXSTYLE);
-    if (fixedMode_ && !selectionConfirmVisible_ && !activeFenceResizeInProgress_) {
-        extendedStyle |= WS_EX_TRANSPARENT;
-    } else {
-        extendedStyle &= ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT);
-    }
+    extendedStyle |= WS_EX_TRANSPARENT;
 
     SetWindowLongPtrW(window_, GWL_EXSTYLE, extendedStyle);
     SetWindowPos(
@@ -736,7 +605,7 @@ void OverlayWindow::Paint(HWND hwnd) {
 
     RECT clientRect{};
     GetClientRect(hwnd, &clientRect);
-    // Keep background transparent; we only draw fence region.
+    // Fill with colorkey so untouched overlay area stays visually transparent.
     HBRUSH clearBrush = CreateSolidBrush(RGB(0, 0, 0));
     FillRect(hdc, &clientRect, clearBrush);
     DeleteObject(clearBrush);
@@ -794,6 +663,7 @@ void OverlayWindow::Paint(HWND hwnd) {
         }
 
         if (!fixedMode_ && !hasSelectionRect_ && activeFenceIndex_.has_value()) {
+            DrawActiveFenceDeleteButton(hdc);
             DrawActiveFenceResizeHandle(hdc);
         }
     }
@@ -831,7 +701,7 @@ void OverlayWindow::Paint(HWND hwnd) {
     if (hasSelectionRect_) {
         alpha = std::max(alpha, kSelectionOnlyAlpha);
     }
-    SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA);
+    SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA | LWA_COLORKEY);
 
     if (!paintLogged_) {
         paintLogged_ = true;
@@ -996,6 +866,34 @@ void OverlayWindow::DrawActiveFenceResizeHandle(HDC hdc) const {
     DeleteObject(fillBrush);
 }
 
+void OverlayWindow::DrawActiveFenceDeleteButton(HDC hdc) const {
+    const std::optional<RECT> activeFenceRect = GetActiveFenceRect();
+    if (!activeFenceRect.has_value()) {
+        return;
+    }
+
+    const RECT buttonRect = BuildActiveFenceDeleteButtonRect(*activeFenceRect);
+    const bool hovered = hoverHitTarget_ == InteractionHitTarget::ActiveFenceDeleteButton;
+    HBRUSH fillBrush = CreateSolidBrush(hovered ? kActiveFenceDeleteButtonHoverColor : kActiveFenceDeleteButtonColor);
+    HPEN borderPen = CreatePen(PS_SOLID, 1, hovered ? kActiveFenceDeleteButtonHoverColor : kActiveFenceDeleteButtonColor);
+    HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
+    HGDIOBJ oldPen = SelectObject(hdc, borderPen);
+    RoundRect(hdc, buttonRect.left, buttonRect.top, buttonRect.right, buttonRect.bottom, 8, 8);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(borderPen);
+    DeleteObject(fillBrush);
+
+    HPEN glyphPen = CreatePen(PS_SOLID, 2, kActiveFenceDeleteGlyphColor);
+    oldPen = SelectObject(hdc, glyphPen);
+    MoveToEx(hdc, buttonRect.left + 6, buttonRect.top + 6, nullptr);
+    LineTo(hdc, buttonRect.right - 6, buttonRect.bottom - 6);
+    MoveToEx(hdc, buttonRect.right - 6, buttonRect.top + 6, nullptr);
+    LineTo(hdc, buttonRect.left + 6, buttonRect.bottom - 6);
+    SelectObject(hdc, oldPen);
+    DeleteObject(glyphPen);
+}
+
 OverlayWindow::SelectionConfirmAction OverlayWindow::HitTestConfirmAction(POINT localPoint) const {
     if (!selectionConfirmVisible_) {
         return SelectionConfirmAction::None;
@@ -1037,6 +935,18 @@ RECT OverlayWindow::BuildActiveFenceResizeHandleRect(const RECT& activeFenceRect
         bottom};
 }
 
+RECT OverlayWindow::BuildActiveFenceDeleteButtonRect(const RECT& activeFenceRect) const {
+    const int offsetX = activeFenceRect.left - virtualDesktopRect_.left;
+    const int offsetY = activeFenceRect.top - virtualDesktopRect_.top;
+    return RECT{
+        offsetX + std::max(0, static_cast<int>(activeFenceRect.right - activeFenceRect.left) -
+                                  kActiveFenceDeleteButtonMargin - kActiveFenceDeleteButtonSize),
+        offsetY + kActiveFenceDeleteButtonMargin,
+        offsetX + std::max(0, static_cast<int>(activeFenceRect.right - activeFenceRect.left) -
+                                  kActiveFenceDeleteButtonMargin),
+        offsetY + kActiveFenceDeleteButtonMargin + kActiveFenceDeleteButtonSize};
+}
+
 OverlayWindow::InteractionHitTarget OverlayWindow::HitTestInteractiveTarget(POINT screenPoint) const {
     if (selectionConfirmVisible_ && IsPointInSelectionConfirm(screenPoint)) {
         return InteractionHitTarget::SelectionConfirm;
@@ -1054,76 +964,112 @@ OverlayWindow::InteractionHitTarget OverlayWindow::HitTestInteractiveTarget(POIN
     const POINT localPoint{
         screenPoint.x - virtualDesktopRect_.left,
         screenPoint.y - virtualDesktopRect_.top};
+    const RECT deleteButtonRect = BuildActiveFenceDeleteButtonRect(*activeFenceRect);
+    if (PtInRect(&deleteButtonRect, localPoint) != FALSE) {
+        return InteractionHitTarget::ActiveFenceDeleteButton;
+    }
+
     const RECT handleRect = BuildActiveFenceResizeHandleRect(*activeFenceRect);
     if (PtInRect(&handleRect, localPoint) != FALSE) {
         return InteractionHitTarget::ActiveFenceResizeHandle;
     }
+
+    const int offsetX = activeFenceRect->left - virtualDesktopRect_.left;
+    const int offsetY = activeFenceRect->top - virtualDesktopRect_.top;
+    RECT moveRect{
+        offsetX,
+        offsetY,
+        offsetX + std::max(1, static_cast<int>(activeFenceRect->right - activeFenceRect->left)),
+        offsetY + std::min(
+                      kActiveFenceMoveAreaHeight,
+                      std::max(1, static_cast<int>(activeFenceRect->bottom - activeFenceRect->top)))};
+    if (PtInRect(&moveRect, localPoint) != FALSE) {
+        return InteractionHitTarget::ActiveFenceMoveArea;
+    }
     return InteractionHitTarget::Transparent;
 }
 
-void OverlayWindow::UpdateResizeHoverState(POINT screenPoint) {
-    const bool hovered =
-        HitTestInteractiveTarget(screenPoint) == InteractionHitTarget::ActiveFenceResizeHandle;
-    if (hovered == resizeHandleHovered_) {
+void OverlayWindow::UpdateInteractionHoverState(POINT screenPoint) {
+    const InteractionHitTarget hitTarget = HitTestInteractiveTarget(screenPoint);
+    if (hitTarget == hoverHitTarget_) {
         return;
     }
 
-    resizeHandleHovered_ = hovered;
+    hoverHitTarget_ = hitTarget;
     if (IsInitialized()) {
         InvalidateRect(window_, nullptr, TRUE);
     }
 }
 
-void OverlayWindow::BeginActiveFenceResize(POINT screenPoint) {
+void OverlayWindow::BeginActiveFenceInteraction(POINT screenPoint, ActiveFenceDragMode dragMode) {
     const std::optional<RECT> activeFenceRect = GetActiveFenceRect();
     if (!activeFenceRect.has_value()) {
         return;
     }
 
-    activeFenceResizeInProgress_ = true;
-    activeFenceResizeStartPoint_ = screenPoint;
-    activeFenceResizeStartRect_ = *activeFenceRect;
+    activeFenceDragMode_ = dragMode;
+    activeFenceDragStartPoint_ = screenPoint;
+    activeFenceDragStartRect_ = *activeFenceRect;
     SetCapture(window_);
     ApplyClickThroughStyle();
     Infrastructure::Logger::Get().Info(
-        L"[Overlay] active fence resize begin. left=" + std::to_wstring(activeFenceResizeStartRect_.left) +
-        L", top=" + std::to_wstring(activeFenceResizeStartRect_.top) +
-        L", right=" + std::to_wstring(activeFenceResizeStartRect_.right) +
-        L", bottom=" + std::to_wstring(activeFenceResizeStartRect_.bottom));
+        L"[Overlay] active fence interaction begin. mode=" +
+        std::to_wstring(static_cast<int>(activeFenceDragMode_)) +
+        L"; left=" + std::to_wstring(activeFenceDragStartRect_.left) +
+        L", top=" + std::to_wstring(activeFenceDragStartRect_.top) +
+        L", right=" + std::to_wstring(activeFenceDragStartRect_.right) +
+        L", bottom=" + std::to_wstring(activeFenceDragStartRect_.bottom));
 }
 
-void OverlayWindow::UpdateActiveFenceResize(POINT screenPoint) {
-    if (!activeFenceResizeInProgress_ || !activeFenceIndex_.has_value() ||
+void OverlayWindow::UpdateActiveFenceInteraction(POINT screenPoint) {
+    if (activeFenceDragMode_ == ActiveFenceDragMode::None || !activeFenceIndex_.has_value() ||
         *activeFenceIndex_ >= fenceRects_.size()) {
         return;
     }
 
-    RECT updatedRect = activeFenceResizeStartRect_;
-    updatedRect.right = activeFenceResizeStartRect_.right + (screenPoint.x - activeFenceResizeStartPoint_.x);
-    updatedRect.bottom = activeFenceResizeStartRect_.bottom + (screenPoint.y - activeFenceResizeStartPoint_.y);
-
-    const LONG maxRight = virtualDesktopRect_.right;
-    const LONG maxBottom = virtualDesktopRect_.bottom;
-    updatedRect.right = std::min(maxRight, std::max(updatedRect.left + kOverlayMinimumFenceWidth, updatedRect.right));
-    updatedRect.bottom =
-        std::min(maxBottom, std::max(updatedRect.top + kOverlayMinimumFenceHeight, updatedRect.bottom));
+    RECT updatedRect = activeFenceDragStartRect_;
+    const int deltaX = screenPoint.x - activeFenceDragStartPoint_.x;
+    const int deltaY = screenPoint.y - activeFenceDragStartPoint_.y;
+    if (activeFenceDragMode_ == ActiveFenceDragMode::Resize) {
+        updatedRect.right = activeFenceDragStartRect_.right + deltaX;
+        updatedRect.bottom = activeFenceDragStartRect_.bottom + deltaY;
+        updatedRect.right = std::min(
+            virtualDesktopRect_.right,
+            std::max(updatedRect.left + kOverlayMinimumFenceWidth, updatedRect.right));
+        updatedRect.bottom = std::min(
+            virtualDesktopRect_.bottom,
+            std::max(updatedRect.top + kOverlayMinimumFenceHeight, updatedRect.bottom));
+    } else {
+        const int width = activeFenceDragStartRect_.right - activeFenceDragStartRect_.left;
+        const int height = activeFenceDragStartRect_.bottom - activeFenceDragStartRect_.top;
+        const LONG maxLeft = std::max(virtualDesktopRect_.left, virtualDesktopRect_.right - width);
+        const LONG maxTop = std::max(virtualDesktopRect_.top, virtualDesktopRect_.bottom - height);
+        updatedRect.left = std::max(
+            virtualDesktopRect_.left,
+            std::min(maxLeft, activeFenceDragStartRect_.left + deltaX));
+        updatedRect.top = std::max(
+            virtualDesktopRect_.top,
+            std::min(maxTop, activeFenceDragStartRect_.top + deltaY));
+        updatedRect.right = updatedRect.left + width;
+        updatedRect.bottom = updatedRect.top + height;
+    }
 
     fenceRects_[*activeFenceIndex_] = updatedRect;
     if (*activeFenceIndex_ == 0) {
         fenceRect_ = updatedRect;
     }
     if (IsInitialized()) {
-        ApplyRoundedRegion();
         InvalidateRect(window_, nullptr, TRUE);
     }
 }
 
-void OverlayWindow::FinishActiveFenceResize(bool commitChanges) {
-    if (!activeFenceResizeInProgress_) {
+void OverlayWindow::FinishActiveFenceInteraction(bool commitChanges) {
+    if (activeFenceDragMode_ == ActiveFenceDragMode::None) {
         return;
     }
 
-    activeFenceResizeInProgress_ = false;
+    const ActiveFenceDragMode dragMode = activeFenceDragMode_;
+    activeFenceDragMode_ = ActiveFenceDragMode::None;
     if (GetCapture() == window_) {
         ReleaseCapture();
     }
@@ -1134,9 +1080,9 @@ void OverlayWindow::FinishActiveFenceResize(bool commitChanges) {
     }
 
     if (!commitChanges) {
-        fenceRects_[*activeFenceIndex_] = activeFenceResizeStartRect_;
+        fenceRects_[*activeFenceIndex_] = activeFenceDragStartRect_;
         if (*activeFenceIndex_ == 0) {
-            fenceRect_ = activeFenceResizeStartRect_;
+            fenceRect_ = activeFenceDragStartRect_;
         }
     } else if (onActiveFenceResize_) {
         onActiveFenceResize_(fenceRects_[*activeFenceIndex_]);
@@ -1144,8 +1090,11 @@ void OverlayWindow::FinishActiveFenceResize(bool commitChanges) {
 
     ApplyClickThroughStyle();
     if (IsInitialized()) {
-        ApplyRoundedRegion();
         InvalidateRect(window_, nullptr, TRUE);
     }
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] active fence interaction finish. mode=" +
+        std::to_wstring(static_cast<int>(dragMode)) +
+        L"; commit=" + std::wstring(commitChanges ? L"true" : L"false"));
 }
 }  // namespace Overlay

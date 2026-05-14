@@ -558,6 +558,7 @@ AppController::AppController(HINSTANCE instance)
       managedFences_(),
       temporarySelection_(),
       pendingFenceCreation_(std::nullopt),
+      fenceEditState_(),
       activeFenceId_(std::nullopt),
       desktopIconReadStatus_(L"Not started."),
       lastGridMoveSummary_(L"Not executed."),
@@ -616,6 +617,8 @@ bool AppController::Initialize() {
             [this](bool confirmed) { HandleSelectionConfirmDecision(confirmed); });
         overlayWindow_.SetActiveFenceResizeCallback(
             [this](const RECT& updatedRect) { (void)UpdateActiveFenceBounds(updatedRect); });
+        overlayWindow_.SetActiveFenceDeleteCallback(
+            [this]() { (void)DeleteActiveFence(); });
         UpdateOverlayWindow();
         overlayWindow_.Show();
     }
@@ -1175,6 +1178,178 @@ RECT AppController::GetPrimaryOverlayFenceRect() const {
     return BuildDefaultFenceRect();
 }
 
+RECT AppController::BuildFenceDeleteButtonRect(const RECT& fenceRect) const {
+    return RECT{
+        fenceRect.right - 26,
+        fenceRect.top + 6,
+        fenceRect.right - 6,
+        fenceRect.top + 26};
+}
+
+RECT AppController::BuildFenceResizeHandleRect(const RECT& fenceRect) const {
+    return RECT{
+        fenceRect.right - 32,
+        fenceRect.bottom - 32,
+        fenceRect.right,
+        fenceRect.bottom};
+}
+
+AppController::FenceEditHitTarget AppController::HitTestFenceEditTarget(long long fenceId, const POINT& point) const {
+    const std::optional<size_t> fenceIndex = FindManagedFenceIndexById(fenceId);
+    if (!fenceIndex.has_value()) {
+        return FenceEditHitTarget::None;
+    }
+
+    const RECT& bounds = managedFences_[*fenceIndex].record.bounds;
+    if (PtInRect(&bounds, point) == FALSE) {
+        return FenceEditHitTarget::None;
+    }
+
+    const RECT deleteRect = BuildFenceDeleteButtonRect(bounds);
+    if (PtInRect(&deleteRect, point) != FALSE) {
+        return FenceEditHitTarget::Delete;
+    }
+
+    const RECT resizeRect = BuildFenceResizeHandleRect(bounds);
+    if (PtInRect(&resizeRect, point) != FALSE) {
+        return FenceEditHitTarget::Resize;
+    }
+
+    return FenceEditHitTarget::Move;
+}
+
+void AppController::ApplyFencePreviewBounds(long long fenceId, const RECT& bounds) {
+    const std::optional<size_t> fenceIndex = FindManagedFenceIndexById(fenceId);
+    if (!fenceIndex.has_value()) {
+        return;
+    }
+
+    managedFences_[*fenceIndex].record.bounds = bounds;
+    UpdateOverlayWindow();
+}
+
+void AppController::BeginFenceEditDrag(long long fenceId, FenceEditHitTarget target, const POINT& point) {
+    const std::optional<size_t> fenceIndex = FindManagedFenceIndexById(fenceId);
+    if (!fenceIndex.has_value()) {
+        return;
+    }
+
+    fenceEditState_.active = true;
+    fenceEditState_.target = target;
+    fenceEditState_.fenceId = fenceId;
+    fenceEditState_.anchorPoint = point;
+    fenceEditState_.originalBounds = managedFences_[*fenceIndex].record.bounds;
+    fenceEditState_.previewBounds = fenceEditState_.originalBounds;
+    SetActiveFence(fenceId);
+    Infrastructure::Logger::Get().Info(
+        L"[FenceEdit] begin. id=" + std::to_wstring(fenceId) +
+        L"; target=" + std::to_wstring(static_cast<int>(target)) +
+        L"; point=" + PointToString(point));
+}
+
+void AppController::UpdateFenceEditDrag(const POINT& point) {
+    if (!fenceEditState_.active) {
+        return;
+    }
+
+    RECT updatedBounds = fenceEditState_.originalBounds;
+    const int deltaX = point.x - fenceEditState_.anchorPoint.x;
+    const int deltaY = point.y - fenceEditState_.anchorPoint.y;
+    if (fenceEditState_.target == FenceEditHitTarget::Move) {
+        const int width = updatedBounds.right - updatedBounds.left;
+        const int height = updatedBounds.bottom - updatedBounds.top;
+        const DisplayDiagnostics display = CollectDisplayDiagnostics();
+        const LONG maxLeft = std::max(display.virtualDesktopRect.left, display.virtualDesktopRect.right - width);
+        const LONG maxTop = std::max(display.virtualDesktopRect.top, display.virtualDesktopRect.bottom - height);
+        updatedBounds.left = std::max(
+            display.virtualDesktopRect.left,
+            std::min(maxLeft, fenceEditState_.originalBounds.left + deltaX));
+        updatedBounds.top = std::max(
+            display.virtualDesktopRect.top,
+            std::min(maxTop, fenceEditState_.originalBounds.top + deltaY));
+        updatedBounds.right = updatedBounds.left + width;
+        updatedBounds.bottom = updatedBounds.top + height;
+    } else if (fenceEditState_.target == FenceEditHitTarget::Resize) {
+        updatedBounds.right = fenceEditState_.originalBounds.right + deltaX;
+        updatedBounds.bottom = fenceEditState_.originalBounds.bottom + deltaY;
+    }
+
+    fenceEditState_.previewBounds = updatedBounds;
+    ApplyFencePreviewBounds(fenceEditState_.fenceId, updatedBounds);
+}
+
+void AppController::EndFenceEditDrag(bool commitChanges) {
+    if (!fenceEditState_.active) {
+        return;
+    }
+
+    const long long fenceId = fenceEditState_.fenceId;
+    const FenceEditHitTarget target = fenceEditState_.target;
+    const RECT previewBounds = fenceEditState_.previewBounds;
+    const RECT originalBounds = fenceEditState_.originalBounds;
+    fenceEditState_ = FenceEditState{};
+
+    if (!commitChanges) {
+        ApplyFencePreviewBounds(fenceId, originalBounds);
+        return;
+    }
+
+    if (target == FenceEditHitTarget::Delete) {
+        (void)DeleteActiveFence();
+        return;
+    }
+
+    if (!UpdateActiveFenceBounds(previewBounds)) {
+        ApplyFencePreviewBounds(fenceId, originalBounds);
+    }
+}
+
+bool AppController::HandleFenceEditMouse(WPARAM message, const POINT& point) {
+    if (!isPaused_ || overlayWindow_.IsSelectionConfirmVisible()) {
+        return false;
+    }
+
+    if (fenceEditState_.active) {
+        switch (message) {
+            case WM_MOUSEMOVE:
+                UpdateFenceEditDrag(point);
+                return false;
+            case WM_LBUTTONUP:
+                EndFenceEditDrag(true);
+                return true;
+            case WM_RBUTTONDOWN:
+            case WM_MBUTTONDOWN:
+                EndFenceEditDrag(false);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    if (message != WM_LBUTTONDOWN) {
+        return false;
+    }
+
+    const std::optional<long long> fenceId = FindManagedFenceIdAtPoint(point);
+    if (!fenceId.has_value()) {
+        return false;
+    }
+
+    const FenceEditHitTarget hitTarget = HitTestFenceEditTarget(*fenceId, point);
+    if (hitTarget == FenceEditHitTarget::None) {
+        return false;
+    }
+
+    if (hitTarget == FenceEditHitTarget::Delete) {
+        SetActiveFence(*fenceId);
+        (void)DeleteActiveFence();
+        return true;
+    }
+
+    BeginFenceEditDrag(*fenceId, hitTarget, point);
+    return true;
+}
+
 void AppController::UpdateOverlayWindow() {
     if (!overlayWindow_.IsInitialized()) {
         return;
@@ -1385,7 +1560,7 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
             isPaused_ = !isPaused_;
             trayIcon_.SetPaused(isPaused_);
             Infrastructure::Logger::Get().Info(
-                isPaused_ ? L"Tray command: Pause enabled." : L"Tray command: Pause disabled.");
+                isPaused_ ? L"Tray command: Fixed control enabled." : L"Tray command: Fixed control disabled.");
             if (overlayWindow_.IsInitialized()) {
                 overlayWindow_.SetFixedMode(!isPaused_);
                 overlayWindow_.Show();
@@ -1458,7 +1633,7 @@ void AppController::UpdateWindowTitle() {
     std::wstring title = L"WinIconManagement | ";
     title += isPinned_ ? L"Pinned" : L"Unpinned";
     title += L" | ";
-    title += isPaused_ ? L"Paused" : L"Active";
+    title += isPaused_ ? L"ControlFixedOff" : L"ControlFixedOn";
     title += L" | ";
     title += isDesktopConnected_ ? L"DesktopConnected" : L"DesktopDisconnected";
     SetWindowTextW(mainWindow_, title.c_str());
@@ -1972,6 +2147,10 @@ bool AppController::ShouldStartSelectionAt(const POINT& point) {
 }
 
 bool AppController::HandleSelectionConfirmMouseFilter(WPARAM message, const POINT& point) {
+    if (HandleFenceEditMouse(message, point)) {
+        return true;
+    }
+
     if (overlayWindow_.IsSelectionConfirmVisible()) {
         const bool isPointInConfirm = overlayWindow_.IsPointInSelectionConfirm(point);
         switch (message) {
@@ -2003,7 +2182,7 @@ bool AppController::HandleSelectionConfirmMouseFilter(WPARAM message, const POIN
         return false;
     }
 
-    return overlayWindow_.HandleActiveFenceResizeMouse(message, point);
+    return false;
 }
 
 bool AppController::RenameActiveFence(HWND ownerWindow) {
@@ -2045,11 +2224,97 @@ bool AppController::UpdateActiveFenceBounds(const RECT& bounds) {
         return false;
     }
 
+    RECT normalizedBounds = bounds;
+    if (normalizedBounds.left > normalizedBounds.right) {
+        std::swap(normalizedBounds.left, normalizedBounds.right);
+    }
+    if (normalizedBounds.top > normalizedBounds.bottom) {
+        std::swap(normalizedBounds.top, normalizedBounds.bottom);
+    }
+
+    const DisplayDiagnostics display = CollectDisplayDiagnostics();
+    const int minWidth = 120;
+    const int minHeight = 80;
+    if ((normalizedBounds.right - normalizedBounds.left) < minWidth) {
+        normalizedBounds.right = normalizedBounds.left + minWidth;
+    }
+    if ((normalizedBounds.bottom - normalizedBounds.top) < minHeight) {
+        normalizedBounds.bottom = normalizedBounds.top + minHeight;
+    }
+
+    const int width = normalizedBounds.right - normalizedBounds.left;
+    const int height = normalizedBounds.bottom - normalizedBounds.top;
+    normalizedBounds.left = std::max(display.virtualDesktopRect.left, normalizedBounds.left);
+    normalizedBounds.top = std::max(display.virtualDesktopRect.top, normalizedBounds.top);
+    normalizedBounds.right = std::min(display.virtualDesktopRect.right, normalizedBounds.right);
+    normalizedBounds.bottom = std::min(display.virtualDesktopRect.bottom, normalizedBounds.bottom);
+    if ((normalizedBounds.right - normalizedBounds.left) < width) {
+        normalizedBounds.left = std::max(display.virtualDesktopRect.left, normalizedBounds.right - width);
+        normalizedBounds.right = normalizedBounds.left + width;
+    }
+    if ((normalizedBounds.bottom - normalizedBounds.top) < height) {
+        normalizedBounds.top = std::max(display.virtualDesktopRect.top, normalizedBounds.bottom - height);
+        normalizedBounds.bottom = normalizedBounds.top + height;
+    }
+
+    const int deltaX = normalizedBounds.left - activeFence->record.bounds.left;
+    const int deltaY = normalizedBounds.top - activeFence->record.bounds.top;
+    std::vector<Persistence::FenceIconRecord> updatedFenceIcons = activeFence->icons;
+    for (Persistence::FenceIconRecord& fenceIcon : updatedFenceIcons) {
+        fenceIcon.currentX += deltaX;
+        fenceIcon.currentY += deltaY;
+    }
+
+    if ((deltaX != 0 || deltaY != 0) && !updatedFenceIcons.empty()) {
+        if (!EnsureDesktopConnection()) {
+            return false;
+        }
+
+        RefreshDesktopIconSnapshot();
+        std::unordered_map<std::wstring, size_t> iconIndexByIdentity;
+        for (size_t i = 0; i < desktopIcons_.size(); ++i) {
+            iconIndexByIdentity.emplace(Persistence::BuildIconIdentity(desktopIcons_[i]), i);
+        }
+
+        std::vector<Desktop::DesktopIcon> iconsToMove;
+        iconsToMove.reserve(updatedFenceIcons.size());
+        for (const Persistence::FenceIconRecord& fenceIcon : updatedFenceIcons) {
+            const auto found = iconIndexByIdentity.find(fenceIcon.iconIdentity);
+            if (found == iconIndexByIdentity.end()) {
+                continue;
+            }
+
+            Desktop::DesktopIcon icon = desktopIcons_[found->second];
+            icon.position.x = fenceIcon.currentX;
+            icon.position.y = fenceIcon.currentY;
+            iconsToMove.push_back(std::move(icon));
+        }
+
+        if (!iconsToMove.empty()) {
+            const int movedCount = desktopIconService_.MoveDesktopIcons(
+                desktopResolveResult_.listViewWindow,
+                desktopResolveResult_.explorerProcessId,
+                iconsToMove);
+            Infrastructure::Logger::Get().Info(
+                L"[Fence] moved fence icons with bounds update. id=" + std::to_wstring(activeFence->record.id) +
+                L"; moved=" + std::to_wstring(movedCount) +
+                L"/" + std::to_wstring(iconsToMove.size()) +
+                L"; delta=(" + std::to_wstring(deltaX) + L"," + std::to_wstring(deltaY) + L")");
+            RefreshDesktopIconSnapshot();
+        }
+    }
+
     Persistence::FenceRecord updatedRecord = activeFence->record;
-    updatedRecord.bounds = BuildFenceRectFromSelection(bounds);
+    updatedRecord.bounds = normalizedBounds;
     if (!fenceRepository_.UpdateFence(updatedRecord)) {
         Infrastructure::Logger::Get().Error(
             L"[Fence] failed to persist active fence bounds. id=" + std::to_wstring(updatedRecord.id));
+        return false;
+    }
+    if (!updatedFenceIcons.empty() &&
+        !fenceRepository_.ReplaceFenceIcons(updatedRecord.id, updatedFenceIcons)) {
+        Infrastructure::Logger::Get().Error(
+            L"[Fence] failed to persist moved fence icons. id=" + std::to_wstring(updatedRecord.id));
         return false;
     }
 

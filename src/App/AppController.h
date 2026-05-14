@@ -41,6 +41,22 @@ private:
         POINT anchorPoint{0, 0};
     };
 
+    enum class FenceEditHitTarget {
+        None = 0,
+        Move = 1,
+        Resize = 2,
+        Delete = 3,
+    };
+
+    struct FenceEditState {
+        bool active = false;
+        FenceEditHitTarget target = FenceEditHitTarget::None;
+        long long fenceId = 0;
+        POINT anchorPoint{0, 0};
+        RECT originalBounds{0, 0, 0, 0};
+        RECT previewBounds{0, 0, 0, 0};
+    };
+
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     void HandleCommand(HWND hwnd, WORD commandId);
@@ -79,6 +95,7 @@ private:
     void HandleSelectionCanceled();
     [[nodiscard]] bool ShouldStartSelectionAt(const POINT& point);
     bool HandleSelectionConfirmMouseFilter(WPARAM message, const POINT& point);
+    bool HandleFenceEditMouse(WPARAM message, const POINT& point);
     void ConfirmSelectionRect(const RECT& selectionRect, const POINT& anchorPoint);
     void HandleSelectionConfirmDecision(bool confirmed);
     void CancelSelectionRect();
@@ -98,6 +115,13 @@ private:
         const std::vector<Desktop::DesktopIcon>& movedIcons);
     [[nodiscard]] RECT BuildDefaultFenceRect() const;
     [[nodiscard]] RECT GetPrimaryOverlayFenceRect() const;
+    [[nodiscard]] RECT BuildFenceDeleteButtonRect(const RECT& fenceRect) const;
+    [[nodiscard]] RECT BuildFenceResizeHandleRect(const RECT& fenceRect) const;
+    [[nodiscard]] FenceEditHitTarget HitTestFenceEditTarget(long long fenceId, const POINT& point) const;
+    void BeginFenceEditDrag(long long fenceId, FenceEditHitTarget target, const POINT& point);
+    void UpdateFenceEditDrag(const POINT& point);
+    void EndFenceEditDrag(bool commitChanges);
+    void ApplyFencePreviewBounds(long long fenceId, const RECT& bounds);
     bool MoveTestDesktopIcon();
     bool RestoreOriginalDesktopLayout();
     void UpdateWindowTitle();
@@ -120,6 +144,7 @@ private:
     std::vector<ManagedFenceState> managedFences_;
     TemporarySelectionState temporarySelection_;
     std::optional<PendingFenceCreationState> pendingFenceCreation_;
+    FenceEditState fenceEditState_;
     std::optional<long long> activeFenceId_;
     std::wstring desktopIconReadStatus_;
     std::wstring lastGridMoveSummary_;
