@@ -1,5 +1,7 @@
 #include "Overlay/OverlayWindow.h"
 
+#include <windowsx.h>
+
 #include <algorithm>
 #include <string>
 #include <sstream>
@@ -34,6 +36,12 @@ constexpr COLORREF kConfirmButtonHoverColor = RGB(63, 122, 227);
 constexpr COLORREF kCancelButtonColor = RGB(67, 76, 93);
 constexpr COLORREF kCancelButtonHoverColor = RGB(88, 99, 120);
 constexpr COLORREF kConfirmTextColor = RGB(238, 244, 255);
+constexpr int kActiveFenceResizeHandleSize = 16;
+constexpr int kActiveFenceResizeHandleMargin = 6;
+constexpr COLORREF kActiveFenceResizeHandleColor = RGB(236, 253, 245);
+constexpr COLORREF kActiveFenceResizeHandleBorderColor = RGB(22, 163, 74);
+constexpr int kOverlayMinimumFenceWidth = 120;
+constexpr int kOverlayMinimumFenceHeight = 80;
 }
 
 namespace Overlay {
@@ -56,7 +64,11 @@ OverlayWindow::OverlayWindow()
       selectionConfirmHoverAction_(SelectionConfirmAction::None),
       fixedMode_(true),
       visible_(false),
-      paintLogged_(false) {}
+      paintLogged_(false),
+      resizeHandleHovered_(false),
+      activeFenceResizeInProgress_(false),
+      activeFenceResizeStartPoint_{0, 0},
+      activeFenceResizeStartRect_{0, 0, 0, 0} {}
 
 OverlayWindow::~OverlayWindow() {
     Destroy();
@@ -230,6 +242,7 @@ void OverlayWindow::ClearSelectionRect() {
     selectionConfirmHoverAction_ = SelectionConfirmAction::None;
     selectionRect_ = RECT{0, 0, 0, 0};
     selectionConfirmRect_ = RECT{0, 0, 0, 0};
+    resizeHandleHovered_ = false;
     if (IsInitialized()) {
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
@@ -246,6 +259,7 @@ void OverlayWindow::ShowSelectionConfirm(const RECT& selectionRect, const POINT&
     selectionConfirmRect_ = BuildConfirmRect();
     selectionConfirmAction_ = SelectionConfirmAction::None;
     selectionConfirmHoverAction_ = SelectionConfirmAction::None;
+    resizeHandleHovered_ = false;
     if (IsInitialized()) {
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
@@ -261,6 +275,7 @@ void OverlayWindow::HideSelectionConfirm() {
     selectionConfirmAction_ = SelectionConfirmAction::None;
     selectionConfirmHoverAction_ = SelectionConfirmAction::None;
     selectionConfirmRect_ = RECT{0, 0, 0, 0};
+    resizeHandleHovered_ = false;
     if (IsInitialized()) {
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
@@ -328,6 +343,55 @@ void OverlayWindow::SetSelectionConfirmCallback(SelectionConfirmCallback onSelec
     onSelectionConfirm_ = std::move(onSelectionConfirm);
 }
 
+bool OverlayWindow::IsActiveFenceResizeInProgress() const {
+    return activeFenceResizeInProgress_;
+}
+
+bool OverlayWindow::IsPointInActiveFenceResizeHandle(POINT screenPoint) const {
+    return HitTestInteractiveTarget(screenPoint) == InteractionHitTarget::ActiveFenceResizeHandle;
+}
+
+bool OverlayWindow::HandleActiveFenceResizeMouse(WPARAM message, POINT screenPoint) {
+    if (fixedMode_ || selectionConfirmVisible_) {
+        return false;
+    }
+
+    switch (message) {
+        case WM_MOUSEMOVE:
+            if (activeFenceResizeInProgress_) {
+                UpdateActiveFenceResize(screenPoint);
+                return true;
+            }
+            UpdateResizeHoverState(screenPoint);
+            return false;
+        case WM_LBUTTONDOWN:
+            if (!IsPointInActiveFenceResizeHandle(screenPoint)) {
+                return false;
+            }
+            BeginActiveFenceResize(screenPoint);
+            return true;
+        case WM_LBUTTONUP:
+            if (!activeFenceResizeInProgress_) {
+                return false;
+            }
+            FinishActiveFenceResize(true);
+            return true;
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+            if (!activeFenceResizeInProgress_) {
+                return false;
+            }
+            FinishActiveFenceResize(false);
+            return true;
+        default:
+            return false;
+    }
+}
+
+void OverlayWindow::SetActiveFenceResizeCallback(ActiveFenceResizeCallback onActiveFenceResize) {
+    onActiveFenceResize_ = std::move(onActiveFenceResize);
+}
+
 LRESULT CALLBACK OverlayWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     OverlayWindow* overlay = nullptr;
     if (message == WM_NCCREATE) {
@@ -346,11 +410,30 @@ LRESULT CALLBACK OverlayWindow::WindowProc(HWND hwnd, UINT message, WPARAM wPara
 
 LRESULT OverlayWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
-        case WM_NCHITTEST:
-            if (fixedMode_) {
-                return HTTRANSPARENT;
+        case WM_NCHITTEST: {
+            const POINT screenPoint{
+                GET_X_LPARAM(lParam),
+                GET_Y_LPARAM(lParam)};
+            const InteractionHitTarget hitTarget = HitTestInteractiveTarget(screenPoint);
+            if (hitTarget == InteractionHitTarget::SelectionConfirm) {
+                return HTCLIENT;
             }
-            return HTCLIENT;
+            if (hitTarget == InteractionHitTarget::ActiveFenceResizeHandle) {
+                return HTBOTTOMRIGHT;
+            }
+            return HTTRANSPARENT;
+        }
+        case WM_SETCURSOR:
+            if (!fixedMode_ && !selectionConfirmVisible_ && resizeHandleHovered_) {
+                SetCursor(LoadCursorW(nullptr, IDC_SIZENWSE));
+                return TRUE;
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+        case WM_CAPTURECHANGED:
+            if (activeFenceResizeInProgress_ && reinterpret_cast<HWND>(lParam) != hwnd) {
+                FinishActiveFenceResize(false);
+            }
+            return 0;
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT:
@@ -566,7 +649,7 @@ void OverlayWindow::ApplyClickThroughStyle() {
     }
 
     LONG_PTR extendedStyle = GetWindowLongPtrW(window_, GWL_EXSTYLE);
-    if (fixedMode_ && !selectionConfirmVisible_) {
+    if (fixedMode_ && !selectionConfirmVisible_ && !activeFenceResizeInProgress_) {
         extendedStyle |= WS_EX_TRANSPARENT;
     } else {
         extendedStyle &= ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT);
@@ -708,6 +791,10 @@ void OverlayWindow::Paint(HWND hwnd) {
                 title += L" [Active]";
             }
             DrawTextW(hdc, title.c_str(), -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+
+        if (!fixedMode_ && !hasSelectionRect_ && activeFenceIndex_.has_value()) {
+            DrawActiveFenceResizeHandle(hdc);
         }
     }
 
@@ -891,6 +978,24 @@ void OverlayWindow::DrawConfirmUI(HDC hdc) const {
     DrawTextW(hdc, L"\u53d6\u6d88\u7ed8\u5236", -1, const_cast<RECT*>(&cancelButton), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+void OverlayWindow::DrawActiveFenceResizeHandle(HDC hdc) const {
+    const std::optional<RECT> activeFenceRect = GetActiveFenceRect();
+    if (!activeFenceRect.has_value()) {
+        return;
+    }
+
+    const RECT handleRect = BuildActiveFenceResizeHandleRect(*activeFenceRect);
+    HBRUSH fillBrush = CreateSolidBrush(kActiveFenceResizeHandleColor);
+    HPEN borderPen = CreatePen(PS_SOLID, 1, kActiveFenceResizeHandleBorderColor);
+    HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
+    HGDIOBJ oldPen = SelectObject(hdc, borderPen);
+    Rectangle(hdc, handleRect.left, handleRect.top, handleRect.right, handleRect.bottom);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(borderPen);
+    DeleteObject(fillBrush);
+}
+
 OverlayWindow::SelectionConfirmAction OverlayWindow::HitTestConfirmAction(POINT localPoint) const {
     if (!selectionConfirmVisible_) {
         return SelectionConfirmAction::None;
@@ -909,5 +1014,138 @@ OverlayWindow::SelectionConfirmAction OverlayWindow::HitTestConfirmAction(POINT 
 
 void OverlayWindow::SetSelectionConfirmAction(SelectionConfirmAction action) {
     selectionConfirmAction_ = action;
+}
+
+std::optional<RECT> OverlayWindow::GetActiveFenceRect() const {
+    if (!activeFenceIndex_.has_value() || *activeFenceIndex_ >= fenceRects_.size()) {
+        return std::nullopt;
+    }
+    return fenceRects_[*activeFenceIndex_];
+}
+
+RECT OverlayWindow::BuildActiveFenceResizeHandleRect(const RECT& activeFenceRect) const {
+    const int offsetX = activeFenceRect.left - virtualDesktopRect_.left;
+    const int offsetY = activeFenceRect.top - virtualDesktopRect_.top;
+    const int width = std::max(1, static_cast<int>(activeFenceRect.right - activeFenceRect.left));
+    const int height = std::max(1, static_cast<int>(activeFenceRect.bottom - activeFenceRect.top));
+    const int right = offsetX + width - kActiveFenceResizeHandleMargin;
+    const int bottom = offsetY + height - kActiveFenceResizeHandleMargin;
+    return RECT{
+        right - kActiveFenceResizeHandleSize,
+        bottom - kActiveFenceResizeHandleSize,
+        right,
+        bottom};
+}
+
+OverlayWindow::InteractionHitTarget OverlayWindow::HitTestInteractiveTarget(POINT screenPoint) const {
+    if (selectionConfirmVisible_ && IsPointInSelectionConfirm(screenPoint)) {
+        return InteractionHitTarget::SelectionConfirm;
+    }
+
+    if (fixedMode_ || selectionConfirmVisible_) {
+        return InteractionHitTarget::Transparent;
+    }
+
+    const std::optional<RECT> activeFenceRect = GetActiveFenceRect();
+    if (!activeFenceRect.has_value()) {
+        return InteractionHitTarget::Transparent;
+    }
+
+    const POINT localPoint{
+        screenPoint.x - virtualDesktopRect_.left,
+        screenPoint.y - virtualDesktopRect_.top};
+    const RECT handleRect = BuildActiveFenceResizeHandleRect(*activeFenceRect);
+    if (PtInRect(&handleRect, localPoint) != FALSE) {
+        return InteractionHitTarget::ActiveFenceResizeHandle;
+    }
+    return InteractionHitTarget::Transparent;
+}
+
+void OverlayWindow::UpdateResizeHoverState(POINT screenPoint) {
+    const bool hovered =
+        HitTestInteractiveTarget(screenPoint) == InteractionHitTarget::ActiveFenceResizeHandle;
+    if (hovered == resizeHandleHovered_) {
+        return;
+    }
+
+    resizeHandleHovered_ = hovered;
+    if (IsInitialized()) {
+        InvalidateRect(window_, nullptr, TRUE);
+    }
+}
+
+void OverlayWindow::BeginActiveFenceResize(POINT screenPoint) {
+    const std::optional<RECT> activeFenceRect = GetActiveFenceRect();
+    if (!activeFenceRect.has_value()) {
+        return;
+    }
+
+    activeFenceResizeInProgress_ = true;
+    activeFenceResizeStartPoint_ = screenPoint;
+    activeFenceResizeStartRect_ = *activeFenceRect;
+    SetCapture(window_);
+    ApplyClickThroughStyle();
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] active fence resize begin. left=" + std::to_wstring(activeFenceResizeStartRect_.left) +
+        L", top=" + std::to_wstring(activeFenceResizeStartRect_.top) +
+        L", right=" + std::to_wstring(activeFenceResizeStartRect_.right) +
+        L", bottom=" + std::to_wstring(activeFenceResizeStartRect_.bottom));
+}
+
+void OverlayWindow::UpdateActiveFenceResize(POINT screenPoint) {
+    if (!activeFenceResizeInProgress_ || !activeFenceIndex_.has_value() ||
+        *activeFenceIndex_ >= fenceRects_.size()) {
+        return;
+    }
+
+    RECT updatedRect = activeFenceResizeStartRect_;
+    updatedRect.right = activeFenceResizeStartRect_.right + (screenPoint.x - activeFenceResizeStartPoint_.x);
+    updatedRect.bottom = activeFenceResizeStartRect_.bottom + (screenPoint.y - activeFenceResizeStartPoint_.y);
+
+    const LONG maxRight = virtualDesktopRect_.right;
+    const LONG maxBottom = virtualDesktopRect_.bottom;
+    updatedRect.right = std::min(maxRight, std::max(updatedRect.left + kOverlayMinimumFenceWidth, updatedRect.right));
+    updatedRect.bottom =
+        std::min(maxBottom, std::max(updatedRect.top + kOverlayMinimumFenceHeight, updatedRect.bottom));
+
+    fenceRects_[*activeFenceIndex_] = updatedRect;
+    if (*activeFenceIndex_ == 0) {
+        fenceRect_ = updatedRect;
+    }
+    if (IsInitialized()) {
+        ApplyRoundedRegion();
+        InvalidateRect(window_, nullptr, TRUE);
+    }
+}
+
+void OverlayWindow::FinishActiveFenceResize(bool commitChanges) {
+    if (!activeFenceResizeInProgress_) {
+        return;
+    }
+
+    activeFenceResizeInProgress_ = false;
+    if (GetCapture() == window_) {
+        ReleaseCapture();
+    }
+
+    if (!activeFenceIndex_.has_value() || *activeFenceIndex_ >= fenceRects_.size()) {
+        ApplyClickThroughStyle();
+        return;
+    }
+
+    if (!commitChanges) {
+        fenceRects_[*activeFenceIndex_] = activeFenceResizeStartRect_;
+        if (*activeFenceIndex_ == 0) {
+            fenceRect_ = activeFenceResizeStartRect_;
+        }
+    } else if (onActiveFenceResize_) {
+        onActiveFenceResize_(fenceRects_[*activeFenceIndex_]);
+    }
+
+    ApplyClickThroughStyle();
+    if (IsInitialized()) {
+        ApplyRoundedRegion();
+        InvalidateRect(window_, nullptr, TRUE);
+    }
 }
 }  // namespace Overlay

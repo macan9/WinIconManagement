@@ -11,6 +11,7 @@ namespace Overlay {
 class OverlayWindow {
 public:
     using SelectionConfirmCallback = std::function<void(bool confirmed)>;
+    using ActiveFenceResizeCallback = std::function<void(const RECT& updatedRect)>;
 
     OverlayWindow();
     ~OverlayWindow();
@@ -39,13 +40,23 @@ public:
     [[nodiscard]] bool IsSelectionConfirmVisible() const;
     [[nodiscard]] bool IsPointInSelectionConfirm(POINT screenPoint) const;
     [[nodiscard]] bool HandleSelectionConfirmClick(WPARAM message, POINT screenPoint);
+    [[nodiscard]] bool IsActiveFenceResizeInProgress() const;
+    [[nodiscard]] bool IsPointInActiveFenceResizeHandle(POINT screenPoint) const;
+    [[nodiscard]] bool HandleActiveFenceResizeMouse(WPARAM message, POINT screenPoint);
     void SetSelectionConfirmCallback(SelectionConfirmCallback onSelectionConfirm);
+    void SetActiveFenceResizeCallback(ActiveFenceResizeCallback onActiveFenceResize);
 
 private:
     enum class SelectionConfirmAction {
         None = 0,
         Confirm = 1,
         Cancel = 2,
+    };
+
+    enum class InteractionHitTarget {
+        Transparent = 0,
+        SelectionConfirm = 1,
+        ActiveFenceResizeHandle = 2,
     };
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -64,8 +75,16 @@ private:
     [[nodiscard]] RECT BuildConfirmButtonRect() const;
     [[nodiscard]] RECT BuildCancelButtonRect() const;
     void DrawConfirmUI(HDC hdc) const;
+    void DrawActiveFenceResizeHandle(HDC hdc) const;
     [[nodiscard]] SelectionConfirmAction HitTestConfirmAction(POINT localPoint) const;
     void SetSelectionConfirmAction(SelectionConfirmAction action);
+    [[nodiscard]] std::optional<RECT> GetActiveFenceRect() const;
+    [[nodiscard]] RECT BuildActiveFenceResizeHandleRect(const RECT& activeFenceRect) const;
+    [[nodiscard]] InteractionHitTarget HitTestInteractiveTarget(POINT screenPoint) const;
+    void UpdateResizeHoverState(POINT screenPoint);
+    void BeginActiveFenceResize(POINT screenPoint);
+    void UpdateActiveFenceResize(POINT screenPoint);
+    void FinishActiveFenceResize(bool commitChanges);
 
     HINSTANCE instance_;
     HWND ownerWindow_;
@@ -84,8 +103,13 @@ private:
     SelectionConfirmAction selectionConfirmAction_;
     SelectionConfirmAction selectionConfirmHoverAction_;
     SelectionConfirmCallback onSelectionConfirm_;
+    ActiveFenceResizeCallback onActiveFenceResize_;
     bool fixedMode_;
     bool visible_;
     bool paintLogged_;
+    bool resizeHandleHovered_;
+    bool activeFenceResizeInProgress_;
+    POINT activeFenceResizeStartPoint_;
+    RECT activeFenceResizeStartRect_;
 };
 }  // namespace Overlay

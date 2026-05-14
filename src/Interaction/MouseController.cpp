@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
-#include <string>
 #include <sstream>
+#include <string>
 
 #include "Infrastructure/Logger.h"
 
 namespace {
 constexpr int kDragThresholdPixels = 12;
+constexpr DWORD kSelectionLogThrottleMs = 500;
 
 Interaction::MouseController* g_activeController = nullptr;
 
@@ -19,6 +20,32 @@ RECT MakeNormalizedRect(const POINT& a, const POINT& b) {
     rect.right = std::max(a.x, b.x);
     rect.bottom = std::max(a.y, b.y);
     return rect;
+}
+
+std::wstring PointToString(const POINT& point) {
+    std::wstringstream stream;
+    stream << L"(" << point.x << L"," << point.y << L")";
+    return stream.str();
+}
+
+std::wstring GetWindowClassName(HWND window) {
+    if (window == nullptr) {
+        return L"<null>";
+    }
+
+    wchar_t className[128]{};
+    const int copied = GetClassNameW(window, className, static_cast<int>(std::size(className)));
+    if (copied <= 0) {
+        return L"<unknown>";
+    }
+    return std::wstring(className, copied);
+}
+
+bool IsDesktopShellClassName(const std::wstring& className) {
+    return className == L"Progman" ||
+           className == L"WorkerW" ||
+           className == L"SHELLDLL_DefView" ||
+           className == L"SysListView32";
 }
 }  // namespace
 
@@ -131,6 +158,16 @@ bool MouseController::IsPointOnDesktop(POINT screenPoint) const {
         return false;
     }
 
+    POINT clientPoint = screenPoint;
+    if (ScreenToClient(desktopListViewWindow_, &clientPoint) == FALSE) {
+        return false;
+    }
+
+    RECT clientRect{};
+    const bool isPointInsideListView =
+        GetClientRect(desktopListViewWindow_, &clientRect) != FALSE &&
+        PtInRect(&clientRect, clientPoint) != FALSE;
+
     HWND underCursor = WindowFromPoint(screenPoint);
     if (underCursor == nullptr) {
         return false;
@@ -142,7 +179,8 @@ bool MouseController::IsPointOnDesktop(POINT screenPoint) const {
 
     HWND current = underCursor;
     while (current != nullptr) {
-        if (current == desktopListViewWindow_) {
+        if (current == desktopListViewWindow_ ||
+            (isPointInsideListView && IsDesktopShellClassName(GetWindowClassName(current)))) {
             return true;
         }
         current = GetParent(current);
@@ -187,9 +225,28 @@ bool MouseController::HandleMouseEvent(WPARAM wParam, const MSLLHOOKSTRUCT* data
     switch (wParam) {
         case WM_LBUTTONDOWN:
             if (!IsPointOnDesktop(point)) {
+                static DWORD s_lastNotDesktopLogTick = 0;
+                const DWORD now = GetTickCount();
+                if (now - s_lastNotDesktopLogTick >= kSelectionLogThrottleMs) {
+                    s_lastNotDesktopLogTick = now;
+                    const HWND underCursor = WindowFromPoint(point);
+                    Infrastructure::Logger::Get().Info(
+                        L"[Selection] ignored left-button down: point is not on desktop. point=" +
+                        PointToString(point) +
+                        L"; hwnd=0x" + std::to_wstring(reinterpret_cast<uintptr_t>(underCursor)) +
+                        L"; class=" + GetWindowClassName(underCursor));
+                }
                 return false;
             }
             if (selectionStartFilter_ && !selectionStartFilter_(point)) {
+                static DWORD s_lastFilteredLogTick = 0;
+                const DWORD now = GetTickCount();
+                if (now - s_lastFilteredLogTick >= kSelectionLogThrottleMs) {
+                    s_lastFilteredLogTick = now;
+                    Infrastructure::Logger::Get().Info(
+                        L"[Selection] ignored left-button down: selection start filter rejected. point=" +
+                        PointToString(point));
+                }
                 return false;
             }
             leftButtonDown_ = true;

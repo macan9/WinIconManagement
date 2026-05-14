@@ -64,9 +64,12 @@ private:
     void PersistBasicSettings();
     void PersistIconSnapshot(const std::wstring& name, const std::wstring& source);
     void ReloadManagedFences();
+    void LoadActiveFenceSetting();
+    void PersistActiveFenceSetting();
     [[nodiscard]] std::optional<long long> FindManagedFenceIdAtPoint(const POINT& point) const;
     [[nodiscard]] std::optional<size_t> FindManagedFenceIndexById(long long fenceId) const;
     void SetActiveFence(std::optional<long long> fenceId);
+    [[nodiscard]] std::optional<ManagedFenceState> BuildSingleActiveFenceState() const;
     [[nodiscard]] std::vector<Desktop::DesktopIcon> BuildOriginalIconsFromManagedFences() const;
     [[nodiscard]] std::vector<Desktop::DesktopIcon> BuildManagedFenceLayoutTargets() const;
     bool RestoreManagedFenceLayout(bool refreshFenceStateAfterMove);
@@ -80,6 +83,10 @@ private:
     void HandleSelectionConfirmDecision(bool confirmed);
     void CancelSelectionRect();
     void ApplyFenceFromSelectionRect(const RECT& selectionRect);
+    bool RenameActiveFence(HWND ownerWindow);
+    bool DeleteActiveFence();
+    bool UpdateActiveFenceBounds(const RECT& bounds);
+    bool ResizeActiveFence(int deltaWidth, int deltaHeight);
     [[nodiscard]] std::vector<Desktop::DesktopIcon> CollectIconsInRect(const RECT& selectionRect) const;
     [[nodiscard]] RECT BuildFenceRectFromSelection(const RECT& selectionRect) const;
     [[nodiscard]] std::vector<Desktop::DesktopIcon> BuildIconsForFenceLayout(

@@ -36,6 +36,46 @@ long long FenceRepository::CreateFence(const FenceRecord& fence) {
     return sqlite3_last_insert_rowid(database_->NativeHandle());
 }
 
+bool FenceRepository::UpdateFence(const FenceRecord& fence) {
+    if (database_ == nullptr || !database_->IsOpen() || fence.id <= 0) {
+        return false;
+    }
+
+    Statement updateFence;
+    if (!database_->Prepare(
+            "UPDATE Fences "
+            "SET name=?1, left_px=?2, top_px=?3, width_px=?4, height_px=?5, style_json=?6, updated_at_utc=?7 "
+            "WHERE id=?8;",
+            &updateFence)) {
+        return false;
+    }
+
+    const int width = fence.bounds.right - fence.bounds.left;
+    const int height = fence.bounds.bottom - fence.bounds.top;
+    return updateFence.BindText(1, fence.name.empty() ? std::wstring(L"Desktop Group") : fence.name) &&
+           updateFence.BindInt(2, fence.bounds.left) &&
+           updateFence.BindInt(3, fence.bounds.top) &&
+           updateFence.BindInt(4, width) &&
+           updateFence.BindInt(5, height) &&
+           updateFence.BindText(6, fence.styleJson.empty() ? std::wstring(L"{}") : fence.styleJson) &&
+           updateFence.BindText(7, UtcNowIso8601()) &&
+           updateFence.BindInt64(8, fence.id) &&
+           updateFence.Step() == SQLITE_DONE &&
+           sqlite3_changes(database_->NativeHandle()) > 0;
+}
+
+bool FenceRepository::DeleteFence(long long fenceId) {
+    if (database_ == nullptr || !database_->IsOpen() || fenceId <= 0) {
+        return false;
+    }
+
+    Statement deleteFence;
+    return database_->Prepare("DELETE FROM Fences WHERE id=?1;", &deleteFence) &&
+           deleteFence.BindInt64(1, fenceId) &&
+           deleteFence.Step() == SQLITE_DONE &&
+           sqlite3_changes(database_->NativeHandle()) > 0;
+}
+
 bool FenceRepository::ReplaceFenceIcons(long long fenceId, const std::vector<FenceIconRecord>& icons) {
     if (database_ == nullptr || !database_->IsOpen() || fenceId <= 0) {
         return false;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cwctype>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -28,6 +29,225 @@ constexpr int kMinWindowHeight = 680;
 constexpr int kSelectionMinWidth = 40;
 constexpr int kSelectionMinHeight = 40;
 constexpr int kFenceInnerPadding = 16;
+constexpr int kFenceResizeStep = 48;
+constexpr int kRenameDialogWidth = 360;
+constexpr int kRenameDialogHeight = 132;
+constexpr int kRenameEditControlId = 5001;
+constexpr int kRenamePromptControlId = 5002;
+constexpr int kRenameOkButtonId = IDOK;
+constexpr int kRenameCancelButtonId = IDCANCEL;
+
+std::wstring TrimWhitespace(const std::wstring& value) {
+    size_t start = 0;
+    while (start < value.size() && std::iswspace(value[start]) != 0) {
+        ++start;
+    }
+
+    size_t end = value.size();
+    while (end > start && std::iswspace(value[end - 1]) != 0) {
+        --end;
+    }
+    return value.substr(start, end - start);
+}
+
+struct RenameFenceDialogState {
+    std::wstring* value = nullptr;
+    std::wstring initialValue;
+    bool confirmed = false;
+};
+
+INT_PTR CALLBACK RenameFenceDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<RenameFenceDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    switch (message) {
+        case WM_CREATE: {
+            const auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            state = reinterpret_cast<RenameFenceDialogState*>(createStruct->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+
+            HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+            HWND prompt = CreateWindowExW(
+                0,
+                L"STATIC",
+                L"请输入分组名称",
+                WS_CHILD | WS_VISIBLE,
+                16,
+                14,
+                kRenameDialogWidth - 32,
+                20,
+                hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRenamePromptControlId)),
+                createStruct->hInstance,
+                nullptr);
+            if (prompt != nullptr) {
+                SendMessageW(prompt, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
+
+            HWND edit = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                L"EDIT",
+                state != nullptr ? state->initialValue.c_str() : L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                16,
+                40,
+                kRenameDialogWidth - 32,
+                24,
+                hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRenameEditControlId)),
+                createStruct->hInstance,
+                nullptr);
+            if (edit != nullptr) {
+                SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+                SendMessageW(edit, EM_SETSEL, 0, -1);
+                SetFocus(edit);
+            }
+
+            HWND okButton = CreateWindowExW(
+                0,
+                L"BUTTON",
+                L"确定",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                kRenameDialogWidth - 180,
+                78,
+                72,
+                26,
+                hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRenameOkButtonId)),
+                createStruct->hInstance,
+                nullptr);
+            if (okButton != nullptr) {
+                SendMessageW(okButton, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
+
+            HWND cancelButton = CreateWindowExW(
+                0,
+                L"BUTTON",
+                L"取消",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                kRenameDialogWidth - 96,
+                78,
+                72,
+                26,
+                hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRenameCancelButtonId)),
+                createStruct->hInstance,
+                nullptr);
+            if (cancelButton != nullptr) {
+                SendMessageW(cancelButton, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
+            return FALSE;
+        }
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case kRenameOkButtonId: {
+                    HWND edit = GetDlgItem(hwnd, kRenameEditControlId);
+                    const int length = edit != nullptr ? GetWindowTextLengthW(edit) : 0;
+                    std::wstring value(static_cast<size_t>(length), L'\0');
+                    if (edit != nullptr && length > 0) {
+                        GetWindowTextW(edit, value.data(), length + 1);
+                    }
+                    value = TrimWhitespace(value);
+                    if (value.empty()) {
+                        MessageBoxW(hwnd, L"分组名称不能为空。", L"WinIconManagement", MB_OK | MB_ICONINFORMATION);
+                        if (edit != nullptr) {
+                            SetFocus(edit);
+                        }
+                        return 0;
+                    }
+                    if (state != nullptr && state->value != nullptr) {
+                        *state->value = value;
+                        state->confirmed = true;
+                    }
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                case kRenameCancelButtonId:
+                    DestroyWindow(hwnd);
+                    return 0;
+                default:
+                    break;
+            }
+            break;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        default:
+            break;
+    }
+
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+bool ShowRenameFenceDialog(HINSTANCE instance, HWND ownerWindow, std::wstring* value) {
+    if (instance == nullptr || value == nullptr) {
+        return false;
+    }
+
+    const wchar_t kRenameDialogClassName[] = L"WinIconManagement.RenameFenceDialog";
+    static bool s_registered = false;
+    if (!s_registered) {
+        WNDCLASSEXW windowClass{};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = RenameFenceDialogProc;
+        windowClass.hInstance = instance;
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        windowClass.lpszClassName = kRenameDialogClassName;
+        if (RegisterClassExW(&windowClass) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            return false;
+        }
+        s_registered = true;
+    }
+
+    RenameFenceDialogState state{};
+    state.value = value;
+    state.initialValue = *value;
+
+    RECT ownerRect{0, 0, 0, 0};
+    if (ownerWindow != nullptr && IsWindow(ownerWindow)) {
+        GetWindowRect(ownerWindow, &ownerRect);
+    } else {
+        ownerRect.right = GetSystemMetrics(SM_CXSCREEN);
+        ownerRect.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+
+    const int x = ownerRect.left + std::max(0L, ((ownerRect.right - ownerRect.left) - kRenameDialogWidth) / 2);
+    const int y = ownerRect.top + std::max(0L, ((ownerRect.bottom - ownerRect.top) - kRenameDialogHeight) / 2);
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        kRenameDialogClassName,
+        L"重命名分组",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        x,
+        y,
+        kRenameDialogWidth,
+        kRenameDialogHeight,
+        ownerWindow,
+        nullptr,
+        instance,
+        &state);
+    if (dialog == nullptr) {
+        return false;
+    }
+
+    EnableWindow(ownerWindow, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
+
+    MSG message{};
+    while (IsWindow(dialog) && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+
+    if (ownerWindow != nullptr && IsWindow(ownerWindow)) {
+        EnableWindow(ownerWindow, TRUE);
+        SetActiveWindow(ownerWindow);
+    }
+    return state.confirmed;
+}
 
 UINT GetDpiForWindowCompat(HWND window) {
     using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
@@ -394,6 +614,8 @@ bool AppController::Initialize() {
     } else {
         overlayWindow_.SetSelectionConfirmCallback(
             [this](bool confirmed) { HandleSelectionConfirmDecision(confirmed); });
+        overlayWindow_.SetActiveFenceResizeCallback(
+            [this](const RECT& updatedRect) { (void)UpdateActiveFenceBounds(updatedRect); });
         UpdateOverlayWindow();
         overlayWindow_.Show();
     }
@@ -441,6 +663,7 @@ bool AppController::InitializePersistence() {
 
     persistenceReady_ = true;
     ReloadManagedFences();
+    LoadActiveFenceSetting();
     Infrastructure::Logger::Get().Info(
         L"[Persistence] ready. dbPath=" + databasePath.wstring() +
         L"; schemaVersion=" + std::to_wstring(Persistence::kDatabaseSchemaVersion));
@@ -513,6 +736,47 @@ void AppController::ReloadManagedFences() {
     }
 }
 
+void AppController::LoadActiveFenceSetting() {
+    if (!persistenceReady_) {
+        return;
+    }
+
+    std::wstring value;
+    if (!settingsRepository_.TryGet(L"active_fence_id", &value)) {
+        if (!managedFences_.empty()) {
+            activeFenceId_ = managedFences_.front().record.id;
+        }
+        return;
+    }
+
+    try {
+        const long long fenceId = std::stoll(value);
+        if (FindManagedFenceIndexById(fenceId).has_value()) {
+            activeFenceId_ = fenceId;
+            return;
+        }
+    } catch (...) {
+    }
+
+    if (!managedFences_.empty()) {
+        activeFenceId_ = managedFences_.front().record.id;
+    } else {
+        activeFenceId_.reset();
+    }
+}
+
+void AppController::PersistActiveFenceSetting() {
+    if (!persistenceReady_) {
+        return;
+    }
+
+    const std::wstring value =
+        activeFenceId_.has_value() ? std::to_wstring(*activeFenceId_) : std::wstring(L"");
+    if (!settingsRepository_.Upsert(L"active_fence_id", value)) {
+        Infrastructure::Logger::Get().Error(L"[Persistence] save active fence setting failed.");
+    }
+}
+
 std::optional<long long> AppController::FindManagedFenceIdAtPoint(const POINT& point) const {
     for (auto it = managedFences_.rbegin(); it != managedFences_.rend(); ++it) {
         if (PtInRect(&it->record.bounds, point) != FALSE) {
@@ -540,12 +804,25 @@ void AppController::SetActiveFence(std::optional<long long> fenceId) {
 
     const bool changed = activeFenceId_ != fenceId;
     activeFenceId_ = fenceId;
+    PersistActiveFenceSetting();
     if (!changed) {
         return;
     }
 
     UpdateOverlayWindow();
     UpdateDiagnosticsTextControl();
+}
+
+std::optional<AppController::ManagedFenceState> AppController::BuildSingleActiveFenceState() const {
+    if (!activeFenceId_.has_value()) {
+        return std::nullopt;
+    }
+
+    const std::optional<size_t> activeIndex = FindManagedFenceIndexById(*activeFenceId_);
+    if (!activeIndex.has_value()) {
+        return std::nullopt;
+    }
+    return managedFences_[*activeIndex];
 }
 
 std::vector<Desktop::DesktopIcon> AppController::BuildOriginalIconsFromManagedFences() const {
@@ -1142,6 +1419,28 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
                     MB_OK | MB_ICONWARNING);
             }
             break;
+        case IDM_TRAY_RENAME_ACTIVE_FENCE:
+            Infrastructure::Logger::Get().Info(L"Tray command: Rename active fence.");
+            (void)RenameActiveFence(hwnd);
+            break;
+        case IDM_TRAY_DELETE_ACTIVE_FENCE:
+            Infrastructure::Logger::Get().Info(L"Tray command: Delete active fence.");
+            if (!DeleteActiveFence()) {
+                MessageBoxW(hwnd, L"删除当前分组失败。", L"WinIconManagement", MB_OK | MB_ICONWARNING);
+            }
+            break;
+        case IDM_TRAY_RESIZE_ACTIVE_FENCE_LARGER:
+            Infrastructure::Logger::Get().Info(L"Tray command: Resize active fence larger.");
+            if (!ResizeActiveFence(kFenceResizeStep, kFenceResizeStep)) {
+                MessageBoxW(hwnd, L"放大当前分组失败。", L"WinIconManagement", MB_OK | MB_ICONWARNING);
+            }
+            break;
+        case IDM_TRAY_RESIZE_ACTIVE_FENCE_SMALLER:
+            Infrastructure::Logger::Get().Info(L"Tray command: Resize active fence smaller.");
+            if (!ResizeActiveFence(-kFenceResizeStep, -kFenceResizeStep)) {
+                MessageBoxW(hwnd, L"缩小当前分组失败。", L"WinIconManagement", MB_OK | MB_ICONWARNING);
+            }
+            break;
         case IDM_TRAY_EXIT:
             isExiting_ = true;
             Infrastructure::Logger::Get().Info(L"Tray command: Exit.");
@@ -1464,6 +1763,121 @@ bool AppController::RestoreOriginalDesktopLayout() {
     return movedCount > 0;
 }
 
+#if 0
+bool AppController::RenameActiveFence(HWND ownerWindow) {
+    if (!activeFenceId_.has_value()) {
+        MessageBoxW(ownerWindow, L"当前没有可重命名的分组。", L"WinIconManagement", MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+
+    const std::optional<size_t> activeIndex = FindManagedFenceIndexById(*activeFenceId_);
+    if (!activeIndex.has_value()) {
+        return false;
+    }
+
+    ManagedFenceState updatedFence = managedFences_[*activeIndex];
+    static int renameSequence = 1;
+    updatedFence.record.name = L"Desktop Group " + std::to_wstring(renameSequence++);
+    if (!fenceRepository_.UpdateFence(updatedFence.record)) {
+        MessageBoxW(ownerWindow, L"重命名分组失败。", L"WinIconManagement", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Fence] renamed active fence. id=" + std::to_wstring(updatedFence.record.id) +
+        L"; name=" + updatedFence.record.name);
+    ReloadManagedFences();
+    UpdateOverlayWindow();
+    UpdateDiagnosticsTextControl();
+    return true;
+}
+
+bool AppController::DeleteActiveFence() {
+    if (!activeFenceId_.has_value()) {
+        return false;
+    }
+
+    const std::optional<size_t> activeIndex = FindManagedFenceIndexById(*activeFenceId_);
+    if (!activeIndex.has_value()) {
+        return false;
+    }
+
+    const ManagedFenceState fenceToDelete = managedFences_[*activeIndex];
+    if (!EnsureDesktopConnection()) {
+        return false;
+    }
+
+    RefreshDesktopIconSnapshot();
+    std::unordered_map<std::wstring, size_t> iconIndexByIdentity;
+    for (size_t i = 0; i < desktopIcons_.size(); ++i) {
+        iconIndexByIdentity.emplace(Persistence::BuildIconIdentity(desktopIcons_[i]), i);
+    }
+
+    std::vector<Desktop::DesktopIcon> iconsToRestore;
+    iconsToRestore.reserve(fenceToDelete.icons.size());
+    for (const Persistence::FenceIconRecord& fenceIcon : fenceToDelete.icons) {
+        const auto found = iconIndexByIdentity.find(fenceIcon.iconIdentity);
+        if (found == iconIndexByIdentity.end()) {
+            continue;
+        }
+
+        Desktop::DesktopIcon icon = desktopIcons_[found->second];
+        icon.position.x = fenceIcon.originalX;
+        icon.position.y = fenceIcon.originalY;
+        iconsToRestore.push_back(std::move(icon));
+    }
+
+    if (!iconsToRestore.empty()) {
+        (void)desktopIconService_.MoveDesktopIcons(
+            desktopResolveResult_.listViewWindow,
+            desktopResolveResult_.explorerProcessId,
+            iconsToRestore);
+        RefreshDesktopIconSnapshot();
+    }
+
+    const long long deletedFenceId = fenceToDelete.record.id;
+    if (!fenceRepository_.DeleteFence(deletedFenceId)) {
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Fence] deleted active fence. id=" + std::to_wstring(deletedFenceId));
+    SetActiveFence(std::nullopt);
+    ReloadManagedFences();
+    UpdateOverlayWindow();
+    UpdateDiagnosticsTextControl();
+    return true;
+}
+
+bool AppController::ResizeActiveFence(int deltaWidth, int deltaHeight) {
+    if (!activeFenceId_.has_value()) {
+        return false;
+    }
+
+    const std::optional<size_t> activeIndex = FindManagedFenceIndexById(*activeFenceId_);
+    if (!activeIndex.has_value()) {
+        return false;
+    }
+
+    ManagedFenceState updatedFence = managedFences_[*activeIndex];
+    RECT bounds = updatedFence.record.bounds;
+    bounds.right += deltaWidth;
+    bounds.bottom += deltaHeight;
+    updatedFence.record.bounds = BuildFenceRectFromSelection(bounds);
+    if (!fenceRepository_.UpdateFence(updatedFence.record)) {
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Fence] resized active fence. id=" + std::to_wstring(updatedFence.record.id) +
+        L"; bounds=" + RectToString(updatedFence.record.bounds));
+    ReloadManagedFences();
+    UpdateOverlayWindow();
+    UpdateDiagnosticsTextControl();
+    return true;
+}
+#endif
+
 void AppController::HandleSelectionStarted(const POINT&) {
     if (mainWindow_ == nullptr || !IsWindow(mainWindow_)) {
         return;
@@ -1520,6 +1934,8 @@ bool AppController::ShouldStartSelectionAt(const POINT& point) {
         desktopResolveResult_.listViewWindow == nullptr ||
         !IsWindow(desktopResolveResult_.listViewWindow) ||
         desktopResolveResult_.explorerProcessId == 0) {
+        Infrastructure::Logger::Get().Info(
+            L"[Selection] rejected start: desktop connection unavailable. point=" + PointToString(point));
         return false;
     }
 
@@ -1533,42 +1949,226 @@ bool AppController::ShouldStartSelectionAt(const POINT& point) {
     }
 
     SetActiveFence(std::nullopt);
-    return desktopIconService_.HitTestDesktopIcon(
-               desktopResolveResult_.listViewWindow,
-               desktopResolveResult_.explorerProcessId,
-               point) == -1;
+    const int hitIconIndex = desktopIconService_.HitTestDesktopIcon(
+        desktopResolveResult_.listViewWindow,
+        desktopResolveResult_.explorerProcessId,
+        point);
+    if (hitIconIndex >= 0) {
+        Infrastructure::Logger::Get().Info(
+            L"[Selection] rejected start: hit desktop icon. point=" + PointToString(point) +
+            L"; iconIndex=" + std::to_wstring(hitIconIndex));
+        return false;
+    }
+    if (hitIconIndex == -1) {
+        Infrastructure::Logger::Get().Info(
+            L"[Selection] accepted start: desktop blank area. point=" + PointToString(point));
+        return true;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Selection] accepted start with hit-test fallback. point=" + PointToString(point) +
+        L"; hitTestResult=" + std::to_wstring(hitIconIndex));
+    return true;
 }
 
 bool AppController::HandleSelectionConfirmMouseFilter(WPARAM message, const POINT& point) {
-    if (!overlayWindow_.IsSelectionConfirmVisible()) {
+    if (overlayWindow_.IsSelectionConfirmVisible()) {
+        const bool isPointInConfirm = overlayWindow_.IsPointInSelectionConfirm(point);
+        switch (message) {
+            case WM_MOUSEMOVE: {
+                const bool confirmHandled = overlayWindow_.HandleSelectionConfirmClick(message, point);
+                (void)confirmHandled;
+                return false;
+            }
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP:
+                if (isPointInConfirm) {
+                    return overlayWindow_.HandleSelectionConfirmClick(message, point);
+                }
+                CancelSelectionRect();
+                return false;
+            case WM_RBUTTONDOWN:
+            case WM_MBUTTONDOWN:
+                CancelSelectionRect();
+                return false;
+            case WM_RBUTTONUP:
+            case WM_MBUTTONUP:
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    if (!isPaused_) {
         return false;
     }
 
-    const bool isPointInConfirm = overlayWindow_.IsPointInSelectionConfirm(point);
-    switch (message) {
-        case WM_MOUSEMOVE: {
-            const bool confirmHandled = overlayWindow_.HandleSelectionConfirmClick(message, point);
-            (void)confirmHandled;
-            return false;
-        }
-        case WM_LBUTTONDOWN:
-        case WM_LBUTTONUP:
-            if (isPointInConfirm) {
-                return overlayWindow_.HandleSelectionConfirmClick(message, point);
-            }
-            CancelSelectionRect();
-            return false;
-        case WM_RBUTTONDOWN:
-        case WM_MBUTTONDOWN:
-            CancelSelectionRect();
-            return false;
-        case WM_RBUTTONUP:
-        case WM_MBUTTONUP:
-            return false;
-        default:
-            return false;
-    }
+    return overlayWindow_.HandleActiveFenceResizeMouse(message, point);
 }
+
+bool AppController::RenameActiveFence(HWND ownerWindow) {
+    const std::optional<ManagedFenceState> activeFence = BuildSingleActiveFenceState();
+    if (!activeFence.has_value()) {
+        MessageBoxW(ownerWindow, L"当前没有可重命名的分组。", L"WinIconManagement", MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+
+    std::wstring updatedName =
+        activeFence->record.name.empty() ? std::wstring(L"Desktop Group") : activeFence->record.name;
+    if (!ShowRenameFenceDialog(instance_, ownerWindow, &updatedName)) {
+        return false;
+    }
+
+    if (updatedName == activeFence->record.name) {
+        return true;
+    }
+
+    Persistence::FenceRecord updatedRecord = activeFence->record;
+    updatedRecord.name = updatedName;
+    if (!fenceRepository_.UpdateFence(updatedRecord)) {
+        MessageBoxW(ownerWindow, L"重命名分组失败。", L"WinIconManagement", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Fence] renamed active fence. id=" + std::to_wstring(updatedRecord.id) +
+        L"; name=" + updatedRecord.name);
+    ReloadManagedFences();
+    UpdateOverlayWindow();
+    UpdateDiagnosticsTextControl();
+    return true;
+}
+
+bool AppController::UpdateActiveFenceBounds(const RECT& bounds) {
+    const std::optional<ManagedFenceState> activeFence = BuildSingleActiveFenceState();
+    if (!activeFence.has_value()) {
+        return false;
+    }
+
+    Persistence::FenceRecord updatedRecord = activeFence->record;
+    updatedRecord.bounds = BuildFenceRectFromSelection(bounds);
+    if (!fenceRepository_.UpdateFence(updatedRecord)) {
+        Infrastructure::Logger::Get().Error(
+            L"[Fence] failed to persist active fence bounds. id=" + std::to_wstring(updatedRecord.id));
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Fence] updated active fence bounds. id=" + std::to_wstring(updatedRecord.id) +
+        L"; bounds=" + RectToString(updatedRecord.bounds));
+    ReloadManagedFences();
+    UpdateOverlayWindow();
+    UpdateDiagnosticsTextControl();
+    return true;
+}
+
+bool AppController::ResizeActiveFence(int deltaWidth, int deltaHeight) {
+    if (!activeFenceId_.has_value()) {
+        return false;
+    }
+
+    const std::optional<size_t> activeIndex = FindManagedFenceIndexById(*activeFenceId_);
+    if (!activeIndex.has_value()) {
+        return false;
+    }
+
+    RECT bounds = managedFences_[*activeIndex].record.bounds;
+    bounds.right += deltaWidth;
+    bounds.bottom += deltaHeight;
+    return UpdateActiveFenceBounds(bounds);
+}
+
+bool AppController::DeleteActiveFence() {
+    if (!activeFenceId_.has_value()) {
+        return false;
+    }
+
+    const std::optional<size_t> activeIndex = FindManagedFenceIndexById(*activeFenceId_);
+    if (!activeIndex.has_value()) {
+        return false;
+    }
+
+    const ManagedFenceState fenceToDelete = managedFences_[*activeIndex];
+    if (!EnsureDesktopConnection()) {
+        return false;
+    }
+
+    RefreshDesktopIconSnapshot();
+    std::unordered_map<std::wstring, size_t> iconIndexByIdentity;
+    for (size_t i = 0; i < desktopIcons_.size(); ++i) {
+        iconIndexByIdentity.emplace(Persistence::BuildIconIdentity(desktopIcons_[i]), i);
+    }
+
+    std::vector<Desktop::DesktopIcon> iconsToRestore;
+    iconsToRestore.reserve(fenceToDelete.icons.size());
+    for (const Persistence::FenceIconRecord& fenceIcon : fenceToDelete.icons) {
+        const auto found = iconIndexByIdentity.find(fenceIcon.iconIdentity);
+        if (found == iconIndexByIdentity.end()) {
+            continue;
+        }
+
+        Desktop::DesktopIcon icon = desktopIcons_[found->second];
+        icon.position.x = fenceIcon.originalX;
+        icon.position.y = fenceIcon.originalY;
+        iconsToRestore.push_back(std::move(icon));
+    }
+
+    if (!iconsToRestore.empty()) {
+        (void)desktopIconService_.MoveDesktopIcons(
+            desktopResolveResult_.listViewWindow,
+            desktopResolveResult_.explorerProcessId,
+            iconsToRestore);
+        RefreshDesktopIconSnapshot();
+    }
+
+    const long long deletedFenceId = fenceToDelete.record.id;
+    if (!fenceRepository_.DeleteFence(deletedFenceId)) {
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Fence] deleted active fence. id=" + std::to_wstring(deletedFenceId));
+    SetActiveFence(std::nullopt);
+    ReloadManagedFences();
+    UpdateOverlayWindow();
+    UpdateDiagnosticsTextControl();
+    return true;
+}
+
+#if 0
+bool AppController::RenameActiveFence(HWND ownerWindow) {
+    const std::optional<ManagedFenceState> activeFence = BuildSingleActiveFenceState();
+    if (!activeFence.has_value()) {
+        MessageBoxW(ownerWindow, L"当前没有可重命名的分组。", L"WinIconManagement", MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+
+    std::wstring updatedName =
+        activeFence->record.name.empty() ? std::wstring(L"Desktop Group") : activeFence->record.name;
+    if (!ShowRenameFenceDialog(instance_, ownerWindow, &updatedName)) {
+        return false;
+    }
+
+    if (updatedName == activeFence->record.name) {
+        return true;
+    }
+
+    Persistence::FenceRecord updatedRecord = activeFence->record;
+    updatedRecord.name = updatedName;
+    if (!fenceRepository_.UpdateFence(updatedRecord)) {
+        MessageBoxW(ownerWindow, L"重命名分组失败。", L"WinIconManagement", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Fence] renamed active fence. id=" + std::to_wstring(updatedRecord.id) +
+        L"; name=" + updatedRecord.name);
+    ReloadManagedFences();
+    UpdateOverlayWindow();
+    UpdateDiagnosticsTextControl();
+    return true;
+}
+#endif
 
 void AppController::ConfirmSelectionRect(const RECT& selectionRect, const POINT& anchorPoint) {
     const int width = selectionRect.right - selectionRect.left;
