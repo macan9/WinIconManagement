@@ -196,6 +196,7 @@ void OverlayWindow::ClearSelectionRect() {
     selectionRect_ = RECT{0, 0, 0, 0};
     selectionConfirmRect_ = RECT{0, 0, 0, 0};
     if (IsInitialized()) {
+        ApplyClickThroughStyle();
         ApplyRoundedRegion();
         InvalidateRect(window_, nullptr, TRUE);
     }

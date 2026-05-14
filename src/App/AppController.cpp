@@ -1317,23 +1317,27 @@ bool AppController::HandleSelectionConfirmMouseFilter(WPARAM message, const POIN
         return false;
     }
 
+    const bool isPointInConfirm = overlayWindow_.IsPointInSelectionConfirm(point);
     switch (message) {
-        case WM_MOUSEMOVE:
-            if (overlayWindow_.IsPointInSelectionConfirm(point)) {
-                return overlayWindow_.HandleSelectionConfirmClick(message, point);
-            }
+        case WM_MOUSEMOVE: {
+            const bool confirmHandled = overlayWindow_.HandleSelectionConfirmClick(message, point);
+            (void)confirmHandled;
             return false;
+        }
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
-            if (overlayWindow_.IsPointInSelectionConfirm(point)) {
+            if (isPointInConfirm) {
                 return overlayWindow_.HandleSelectionConfirmClick(message, point);
             }
-            return true;
+            CancelSelectionRect();
+            return false;
         case WM_RBUTTONDOWN:
-        case WM_RBUTTONUP:
         case WM_MBUTTONDOWN:
+            CancelSelectionRect();
+            return false;
+        case WM_RBUTTONUP:
         case WM_MBUTTONUP:
-            return true;
+            return false;
         default:
             return false;
     }

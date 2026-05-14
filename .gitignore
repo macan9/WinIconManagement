@@ -6,4 +6,8 @@ dist/
 *.VC.db
 *.VC.opendb
 .vs/
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json

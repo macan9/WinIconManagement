@@ -117,12 +117,6 @@ bool MouseController::IsPointOnDesktop(POINT screenPoint) const {
         return false;
     }
 
-    RECT listViewRect{};
-    if (GetWindowRect(desktopListViewWindow_, &listViewRect) != FALSE &&
-        PtInRect(&listViewRect, screenPoint) != FALSE) {
-        return true;
-    }
-
     HWND underCursor = WindowFromPoint(screenPoint);
     if (underCursor == nullptr) {
         return false;
