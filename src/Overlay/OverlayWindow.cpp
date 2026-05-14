@@ -12,8 +12,11 @@ constexpr wchar_t kOverlayWindowClassName[] = L"WinIconManagement.OverlayWindow"
 constexpr int kFenceCornerRadiusPixels = 10;
 constexpr COLORREF kFenceFillColor = RGB(76, 143, 255);
 constexpr COLORREF kFenceBorderColor = RGB(36, 99, 235);
+constexpr COLORREF kFenceActiveFillColor = RGB(34, 197, 94);
+constexpr COLORREF kFenceActiveBorderColor = RGB(21, 128, 61);
 constexpr BYTE kFenceFillAlpha = 70;
 constexpr int kFenceBorderWidth = 2;
+constexpr int kFenceActiveBorderWidth = 3;
 constexpr COLORREF kSelectionFillColor = RGB(59, 130, 246);
 constexpr COLORREF kSelectionBorderColor = RGB(37, 99, 235);
 constexpr int kSelectionBorderWidth = 2;
@@ -40,6 +43,9 @@ OverlayWindow::OverlayWindow()
       window_(nullptr),
       desktopHostWindow_(nullptr),
       virtualDesktopRect_{0, 0, 0, 0},
+      fenceRects_(),
+      fenceTitles_(),
+      activeFenceIndex_(std::nullopt),
       fenceRect_{120, 120, 560, 360},
       selectionRect_{0, 0, 0, 0},
       hasSelectionRect_(false),
@@ -124,9 +130,25 @@ void OverlayWindow::SetFixedMode(bool fixedMode) {
         L"[Overlay] SetFixedMode: " + std::wstring(fixedMode_ ? L"fixed" : L"edit"));
 }
 
+void OverlayWindow::SetFenceRects(const std::vector<RECT>& fenceRects) {
+    fenceRects_ = fenceRects;
+    NormalizeFenceRects();
+    if (!fenceRects_.empty()) {
+        fenceRect_ = fenceRects_.front();
+    }
+    if (IsInitialized()) {
+        ApplyRoundedRegion();
+        InvalidateRect(window_, nullptr, TRUE);
+    }
+    Infrastructure::Logger::Get().Info(
+        L"[Overlay] SetFenceRects: count=" + std::to_wstring(fenceRects_.size()));
+}
+
 void OverlayWindow::SetFenceRect(const RECT& fenceRect) {
     fenceRect_ = fenceRect;
     NormalizeFenceRect();
+    fenceRects_.clear();
+    fenceRects_.push_back(fenceRect_);
     if (IsInitialized()) {
         ApplyRoundedRegion();
         InvalidateRect(window_, nullptr, TRUE);
@@ -136,6 +158,19 @@ void OverlayWindow::SetFenceRect(const RECT& fenceRect) {
         L", top=" + std::to_wstring(fenceRect_.top) +
         L", right=" + std::to_wstring(fenceRect_.right) +
         L", bottom=" + std::to_wstring(fenceRect_.bottom));
+}
+
+void OverlayWindow::SetFencePresentation(
+    const std::vector<std::wstring>& fenceTitles,
+    std::optional<size_t> activeFenceIndex) {
+    fenceTitles_ = fenceTitles;
+    activeFenceIndex_ = activeFenceIndex;
+    if (activeFenceIndex_.has_value() && *activeFenceIndex_ >= fenceRects_.size()) {
+        activeFenceIndex_.reset();
+    }
+    if (IsInitialized()) {
+        InvalidateRect(window_, nullptr, TRUE);
+    }
 }
 
 void OverlayWindow::SetVirtualDesktopRect(const RECT& virtualDesktopRect) {
@@ -406,21 +441,50 @@ void OverlayWindow::ApplyRoundedRegion() {
         return;
     }
 
-    NormalizeFenceRect();
-    const int fenceOffsetX = fenceRect_.left - virtualDesktopRect_.left;
-    const int fenceOffsetY = fenceRect_.top - virtualDesktopRect_.top;
-    const int fenceWidth = std::max(1, static_cast<int>(fenceRect_.right - fenceRect_.left));
-    const int fenceHeight = std::max(1, static_cast<int>(fenceRect_.bottom - fenceRect_.top));
+    NormalizeFenceRects();
 
-    HRGN region = CreateRoundRectRgn(
-        fenceOffsetX,
-        fenceOffsetY,
-        fenceOffsetX + fenceWidth + 1,
-        fenceOffsetY + fenceHeight + 1,
-        kFenceCornerRadiusPixels * 2,
-        kFenceCornerRadiusPixels * 2);
+    HRGN region = nullptr;
+    int fenceCountInRegion = 0;
+    for (const RECT& fenceRect : fenceRects_) {
+        const int fenceOffsetX = fenceRect.left - virtualDesktopRect_.left;
+        const int fenceOffsetY = fenceRect.top - virtualDesktopRect_.top;
+        const int fenceWidth = std::max(1, static_cast<int>(fenceRect.right - fenceRect.left));
+        const int fenceHeight = std::max(1, static_cast<int>(fenceRect.bottom - fenceRect.top));
+
+        HRGN fenceRegion = CreateRoundRectRgn(
+            fenceOffsetX,
+            fenceOffsetY,
+            fenceOffsetX + fenceWidth + 1,
+            fenceOffsetY + fenceHeight + 1,
+            kFenceCornerRadiusPixels * 2,
+            kFenceCornerRadiusPixels * 2);
+        if (fenceRegion == nullptr) {
+            continue;
+        }
+
+        if (region == nullptr) {
+            region = fenceRegion;
+        } else {
+            HRGN unionRegion = CreateRectRgn(0, 0, 0, 0);
+            if (unionRegion != nullptr) {
+                const int combineResult = CombineRgn(unionRegion, region, fenceRegion, RGN_OR);
+                if (combineResult != ERROR) {
+                    DeleteObject(region);
+                    region = unionRegion;
+                } else {
+                    DeleteObject(unionRegion);
+                }
+            }
+            DeleteObject(fenceRegion);
+        }
+        ++fenceCountInRegion;
+    }
+
     if (region == nullptr) {
-        Infrastructure::Logger::Get().Error(L"[Overlay] CreateRoundRectRgn failed.");
+        region = CreateRectRgn(0, 0, 0, 0);
+    }
+    if (region == nullptr) {
+        Infrastructure::Logger::Get().Error(L"[Overlay] failed to create base region.");
         return;
     }
 
@@ -491,8 +555,7 @@ void OverlayWindow::ApplyRoundedRegion() {
         return;
     }
     Infrastructure::Logger::Get().Info(
-        L"[Overlay] ApplyRoundedRegion: fenceSize=" + std::to_wstring(fenceWidth) +
-        L"x" + std::to_wstring(fenceHeight) +
+        L"[Overlay] ApplyRoundedRegion: fenceCount=" + std::to_wstring(fenceCountInRegion) +
         L"; selection=" + std::wstring(hasSelectionRect_ ? L"true" : L"false") +
         L"; confirm=" + std::wstring(selectionConfirmVisible_ ? L"true" : L"false"));
 }
@@ -550,6 +613,19 @@ void OverlayWindow::NormalizeFenceRect() {
     }
 }
 
+void OverlayWindow::NormalizeFenceRects() {
+    if (fenceRects_.empty()) {
+        fenceRects_.push_back(fenceRect_);
+    }
+
+    for (RECT& fenceRect : fenceRects_) {
+        fenceRect_ = fenceRect;
+        NormalizeFenceRect();
+        fenceRect = fenceRect_;
+    }
+    fenceRect_ = fenceRects_.front();
+}
+
 void OverlayWindow::EnsureDesktopLayerZOrder() const {
     if (!IsInitialized()) {
         return;
@@ -582,42 +658,57 @@ void OverlayWindow::Paint(HWND hwnd) {
     FillRect(hdc, &clientRect, clearBrush);
     DeleteObject(clearBrush);
 
-    const int offsetX = fenceRect_.left - virtualDesktopRect_.left;
-    const int offsetY = fenceRect_.top - virtualDesktopRect_.top;
-    RECT localFenceRect{
-        offsetX,
-        offsetY,
-        offsetX + std::max(1, static_cast<int>(fenceRect_.right - fenceRect_.left)),
-        offsetY + std::max(1, static_cast<int>(fenceRect_.bottom - fenceRect_.top))};
-
     if (!hasSelectionRect_) {
-        HBRUSH fillBrush = CreateSolidBrush(kFenceFillColor);
-        HPEN borderPen = CreatePen(PS_SOLID, kFenceBorderWidth, kFenceBorderColor);
-        HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
-        HGDIOBJ oldPen = SelectObject(hdc, borderPen);
-
-        RoundRect(
-            hdc,
-            localFenceRect.left,
-            localFenceRect.top,
-            localFenceRect.right,
-            localFenceRect.bottom,
-            kFenceCornerRadiusPixels * 2,
-            kFenceCornerRadiusPixels * 2);
-
-        SelectObject(hdc, oldPen);
-        SelectObject(hdc, oldBrush);
-        DeleteObject(borderPen);
-        DeleteObject(fillBrush);
-
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(255, 255, 255));
-        RECT titleRect{
-            localFenceRect.left + 12,
-            localFenceRect.top + 10,
-            localFenceRect.right - 12,
-            localFenceRect.top + 32};
-        DrawTextW(hdc, L"Desktop Group", -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        for (size_t i = 0; i < fenceRects_.size(); ++i) {
+            const RECT& fenceRect = fenceRects_[i];
+            const bool isActiveFence = activeFenceIndex_.has_value() && *activeFenceIndex_ == i;
+            const int offsetX = fenceRect.left - virtualDesktopRect_.left;
+            const int offsetY = fenceRect.top - virtualDesktopRect_.top;
+            RECT localFenceRect{
+                offsetX,
+                offsetY,
+                offsetX + std::max(1, static_cast<int>(fenceRect.right - fenceRect.left)),
+                offsetY + std::max(1, static_cast<int>(fenceRect.bottom - fenceRect.top))};
+
+            const COLORREF fillColor = isActiveFence ? kFenceActiveFillColor : kFenceFillColor;
+            const COLORREF borderColor = isActiveFence ? kFenceActiveBorderColor : kFenceBorderColor;
+            const int borderWidth = isActiveFence ? kFenceActiveBorderWidth : kFenceBorderWidth;
+
+            HBRUSH fillBrush = CreateSolidBrush(fillColor);
+            HPEN borderPen = CreatePen(PS_SOLID, borderWidth, borderColor);
+            HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
+            HGDIOBJ oldPen = SelectObject(hdc, borderPen);
+
+            RoundRect(
+                hdc,
+                localFenceRect.left,
+                localFenceRect.top,
+                localFenceRect.right,
+                localFenceRect.bottom,
+                kFenceCornerRadiusPixels * 2,
+                kFenceCornerRadiusPixels * 2);
+
+            SelectObject(hdc, oldPen);
+            SelectObject(hdc, oldBrush);
+            DeleteObject(borderPen);
+            DeleteObject(fillBrush);
+
+            RECT titleRect{
+                localFenceRect.left + 12,
+                localFenceRect.top + 10,
+                localFenceRect.right - 12,
+                localFenceRect.top + 32};
+            std::wstring title = L"Desktop Group";
+            if (i < fenceTitles_.size() && !fenceTitles_[i].empty()) {
+                title = fenceTitles_[i];
+            }
+            if (isActiveFence) {
+                title += L" [Active]";
+            }
+            DrawTextW(hdc, title.c_str(), -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        }
     }
 
     if (hasSelectionRect_) {

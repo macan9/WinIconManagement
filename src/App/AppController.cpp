@@ -335,8 +335,10 @@ AppController::AppController(HINSTANCE instance)
       diagnosticsTextControl_(nullptr),
       trayIcon_(),
       desktopIconCount_(0),
-      pendingSelectionRect_{0, 0, 0, 0},
-      hasPendingSelectionRect_(false),
+      managedFences_(),
+      temporarySelection_(),
+      pendingFenceCreation_(std::nullopt),
+      activeFenceId_(std::nullopt),
       desktopIconReadStatus_(L"Not started."),
       lastGridMoveSummary_(L"Not executed."),
       database_(),
@@ -438,6 +440,7 @@ bool AppController::InitializePersistence() {
     }
 
     persistenceReady_ = true;
+    ReloadManagedFences();
     Infrastructure::Logger::Get().Info(
         L"[Persistence] ready. dbPath=" + databasePath.wstring() +
         L"; schemaVersion=" + std::to_wstring(Persistence::kDatabaseSchemaVersion));
@@ -474,6 +477,151 @@ void AppController::PersistIconSnapshot(const std::wstring& name, const std::wst
         L"; name=" + name +
         L"; source=" + source +
         L"; iconCount=" + std::to_wstring(desktopIcons_.size()));
+}
+
+void AppController::ReloadManagedFences() {
+    managedFences_.clear();
+    if (!persistenceReady_) {
+        activeFenceId_.reset();
+        return;
+    }
+
+    const std::vector<Persistence::FenceRecord> fenceRecords = fenceRepository_.ListFences();
+    managedFences_.reserve(fenceRecords.size());
+    for (const Persistence::FenceRecord& fenceRecord : fenceRecords) {
+        ManagedFenceState state{};
+        state.record = fenceRecord;
+        state.icons = fenceRepository_.ListFenceIcons(fenceRecord.id);
+        managedFences_.push_back(std::move(state));
+    }
+
+    if (!activeFenceId_.has_value()) {
+        if (!managedFences_.empty()) {
+            activeFenceId_ = managedFences_.front().record.id;
+        }
+        return;
+    }
+
+    const auto activeFence = std::find_if(
+        managedFences_.begin(),
+        managedFences_.end(),
+        [this](const ManagedFenceState& managedFence) {
+            return managedFence.record.id == *activeFenceId_;
+        });
+    if (activeFence == managedFences_.end()) {
+        activeFenceId_.reset();
+    }
+}
+
+std::optional<long long> AppController::FindManagedFenceIdAtPoint(const POINT& point) const {
+    for (auto it = managedFences_.rbegin(); it != managedFences_.rend(); ++it) {
+        if (PtInRect(&it->record.bounds, point) != FALSE) {
+            return it->record.id;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<size_t> AppController::FindManagedFenceIndexById(long long fenceId) const {
+    for (size_t i = 0; i < managedFences_.size(); ++i) {
+        if (managedFences_[i].record.id == fenceId) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+void AppController::SetActiveFence(std::optional<long long> fenceId) {
+    if (fenceId.has_value()) {
+        if (!FindManagedFenceIndexById(*fenceId).has_value()) {
+            fenceId.reset();
+        }
+    }
+
+    const bool changed = activeFenceId_ != fenceId;
+    activeFenceId_ = fenceId;
+    if (!changed) {
+        return;
+    }
+
+    UpdateOverlayWindow();
+    UpdateDiagnosticsTextControl();
+}
+
+std::vector<Desktop::DesktopIcon> AppController::BuildOriginalIconsFromManagedFences() const {
+    std::vector<Desktop::DesktopIcon> icons;
+    std::unordered_map<std::wstring, size_t> iconIndexByIdentity;
+
+    for (size_t i = 0; i < desktopIcons_.size(); ++i) {
+        iconIndexByIdentity.emplace(Persistence::BuildIconIdentity(desktopIcons_[i]), i);
+    }
+
+    for (const ManagedFenceState& managedFence : managedFences_) {
+        for (const Persistence::FenceIconRecord& fenceIcon : managedFence.icons) {
+            const auto found = iconIndexByIdentity.find(fenceIcon.iconIdentity);
+            if (found == iconIndexByIdentity.end()) {
+                continue;
+            }
+
+            Desktop::DesktopIcon icon = desktopIcons_[found->second];
+            icon.position.x = fenceIcon.originalX;
+            icon.position.y = fenceIcon.originalY;
+            icons.push_back(std::move(icon));
+        }
+    }
+    return icons;
+}
+
+std::vector<Desktop::DesktopIcon> AppController::BuildManagedFenceLayoutTargets() const {
+    std::vector<Desktop::DesktopIcon> icons;
+    std::unordered_map<std::wstring, size_t> iconIndexByIdentity;
+
+    for (size_t i = 0; i < desktopIcons_.size(); ++i) {
+        iconIndexByIdentity.emplace(Persistence::BuildIconIdentity(desktopIcons_[i]), i);
+    }
+
+    for (const ManagedFenceState& managedFence : managedFences_) {
+        for (const Persistence::FenceIconRecord& fenceIcon : managedFence.icons) {
+            const auto found = iconIndexByIdentity.find(fenceIcon.iconIdentity);
+            if (found == iconIndexByIdentity.end()) {
+                continue;
+            }
+
+            Desktop::DesktopIcon icon = desktopIcons_[found->second];
+            icon.position.x = fenceIcon.currentX;
+            icon.position.y = fenceIcon.currentY;
+            icons.push_back(std::move(icon));
+        }
+    }
+    return icons;
+}
+
+bool AppController::RestoreManagedFenceLayout(bool refreshFenceStateAfterMove) {
+    if (!EnsureDesktopAndIconsReady()) {
+        return false;
+    }
+    if (managedFences_.empty()) {
+        return false;
+    }
+
+    const std::vector<Desktop::DesktopIcon> iconsToMove = BuildManagedFenceLayoutTargets();
+    if (iconsToMove.empty()) {
+        return false;
+    }
+
+    const int movedCount = desktopIconService_.MoveDesktopIcons(
+        desktopResolveResult_.listViewWindow,
+        desktopResolveResult_.explorerProcessId,
+        iconsToMove);
+
+    if (movedCount > 0) {
+        RefreshDesktopIconSnapshot();
+        if (refreshFenceStateAfterMove) {
+            ReloadManagedFences();
+        }
+        UpdateOverlayWindow();
+    }
+    return movedCount > 0;
 }
 
 bool AppController::EnsureDesktopConnection() {
@@ -725,6 +873,31 @@ void AppController::ShowMainWindow() {
     BringWindowToTop(mainWindow_);
 }
 
+RECT AppController::BuildDefaultFenceRect() const {
+    const DisplayDiagnostics display = CollectDisplayDiagnostics();
+    const RECT layoutBaseRect = display.hasPrimaryMonitor
+                                    ? display.primaryMonitorRect
+                                    : display.virtualDesktopRect;
+
+    RECT fenceRect{};
+    const int width = layoutBaseRect.right - layoutBaseRect.left;
+    const int height = layoutBaseRect.bottom - layoutBaseRect.top;
+    const int fenceWidth = std::max(280, width / 4);
+    const int fenceHeight = std::max(180, height / 4);
+    fenceRect.left = layoutBaseRect.left + std::max(48, width / 8);
+    fenceRect.top = layoutBaseRect.top + std::max(48, height / 8);
+    fenceRect.right = fenceRect.left + fenceWidth;
+    fenceRect.bottom = fenceRect.top + fenceHeight;
+    return fenceRect;
+}
+
+RECT AppController::GetPrimaryOverlayFenceRect() const {
+    if (!managedFences_.empty()) {
+        return managedFences_.front().record.bounds;
+    }
+    return BuildDefaultFenceRect();
+}
+
 void AppController::UpdateOverlayWindow() {
     if (!overlayWindow_.IsInitialized()) {
         return;
@@ -744,27 +917,33 @@ void AppController::UpdateOverlayWindow() {
 
     const DisplayDiagnostics display = CollectDisplayDiagnostics();
     overlayWindow_.SetVirtualDesktopRect(display.virtualDesktopRect);
+    std::vector<RECT> overlayFenceRects;
+    std::vector<std::wstring> overlayFenceTitles;
+    overlayFenceRects.reserve(std::max<size_t>(managedFences_.size(), 1));
+    overlayFenceTitles.reserve(managedFences_.size());
+    for (const ManagedFenceState& managedFence : managedFences_) {
+        overlayFenceRects.push_back(managedFence.record.bounds);
+        std::wstring title = managedFence.record.name.empty() ? L"Desktop Group" : managedFence.record.name;
+        title += L" #" + std::to_wstring(managedFence.record.id);
+        title += L" (" + std::to_wstring(managedFence.icons.size()) + L")";
+        overlayFenceTitles.push_back(std::move(title));
+    }
+    if (overlayFenceRects.empty()) {
+        overlayFenceRects.push_back(GetPrimaryOverlayFenceRect());
+    }
 
-    const RECT layoutBaseRect = display.hasPrimaryMonitor
-                                    ? display.primaryMonitorRect
-                                    : display.virtualDesktopRect;
-    RECT fenceRect{};
-    const int width = layoutBaseRect.right - layoutBaseRect.left;
-    const int height = layoutBaseRect.bottom - layoutBaseRect.top;
-    const int fenceWidth = std::max(280, width / 4);
-    const int fenceHeight = std::max(180, height / 4);
-    fenceRect.left = layoutBaseRect.left + std::max(48, width / 8);
-    fenceRect.top = layoutBaseRect.top + std::max(48, height / 8);
-    fenceRect.right = fenceRect.left + fenceWidth;
-    fenceRect.bottom = fenceRect.top + fenceHeight;
-
-    overlayWindow_.SetFenceRect(fenceRect);
+    overlayWindow_.SetFenceRects(overlayFenceRects);
+    std::optional<size_t> activeFenceIndex;
+    if (activeFenceId_.has_value()) {
+        activeFenceIndex = FindManagedFenceIndexById(*activeFenceId_);
+    }
+    overlayWindow_.SetFencePresentation(overlayFenceTitles, activeFenceIndex);
     overlayWindow_.SetFixedMode(!isPaused_);
     Infrastructure::Logger::Get().Info(
-        L"[Overlay] UpdateOverlayWindow base=" +
-        std::wstring(display.hasPrimaryMonitor ? L"primary" : L"virtual") +
-        L"; baseRect=" + RectToString(layoutBaseRect) +
-        L"; fenceRect=" + RectToString(fenceRect));
+        L"[Overlay] UpdateOverlayWindow primaryFence=" + RectToString(overlayFenceRects.front()) +
+        L"; managedFenceCount=" + std::to_wstring(managedFences_.size()) +
+        L"; activeFence=" +
+        (activeFenceId_.has_value() ? std::to_wstring(*activeFenceId_) : std::wstring(L"none")));
 }
 
 LRESULT CALLBACK AppController::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -798,12 +977,15 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
 
     switch (message) {
         case WM_APP + 100:
-            hasPendingSelectionRect_ = false;
+            temporarySelection_.active = false;
+            pendingFenceCreation_.reset();
             overlayWindow_.ClearSelectionRect();
             return 0;
         case WM_APP + 101: {
             const auto* selectionRect = reinterpret_cast<RECT*>(lParam);
             if (selectionRect != nullptr) {
+                temporarySelection_.active = true;
+                temporarySelection_.rect = *selectionRect;
                 overlayWindow_.SetSelectionRect(*selectionRect);
                 delete selectionRect;
             }
@@ -820,7 +1002,8 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
             return 0;
         }
         case WM_APP + 103:
-            hasPendingSelectionRect_ = false;
+            temporarySelection_.active = false;
+            pendingFenceCreation_.reset();
             overlayWindow_.ClearSelectionRect();
             return 0;
         case WM_COMMAND:
@@ -962,6 +1145,9 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
         case IDM_TRAY_EXIT:
             isExiting_ = true;
             Infrastructure::Logger::Get().Info(L"Tray command: Exit.");
+            if (!RestoreOriginalDesktopLayout()) {
+                Infrastructure::Logger::Get().Error(L"[Exit] restore original desktop layout failed before shutdown.");
+            }
             DestroyWindow(hwnd);
             break;
         default:
@@ -1044,6 +1230,13 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
     if (isDesktopConnected_) {
         mouseController_.SetEnabled(true);
         RefreshDesktopIconSnapshot();
+        if (!managedFences_.empty()) {
+            const bool restoredManagedFences = RestoreManagedFenceLayout(false);
+            Infrastructure::Logger::Get().Info(
+                L"[Startup] managed fence restore=" +
+                std::wstring(restoredManagedFences ? L"true" : L"false") +
+                L"; fenceCount=" + std::to_wstring(managedFences_.size()));
+        }
         UpdateOverlayWindow();
         if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
             InvalidateRect(mainWindow_, nullptr, TRUE);
@@ -1213,13 +1406,6 @@ bool AppController::RestoreOriginalDesktopLayout() {
         UpdateDiagnosticsTextControl();
         return false;
     }
-    if (originalDesktopIcons_.empty()) {
-        desktopIconReadStatus_ = L"Restore failed: no original snapshot available.";
-        lastGridMoveSummary_ = L"Restore failed: no original snapshot available.";
-        Infrastructure::Logger::Get().Error(L"[DesktopMove] restore skipped: no original snapshot.");
-        UpdateDiagnosticsTextControl();
-        return false;
-    }
 
     // Reconnect before restore to avoid stale handles after Explorer restarts.
     ResolveDesktopWindows(false);
@@ -1232,11 +1418,24 @@ bool AppController::RestoreOriginalDesktopLayout() {
         return false;
     }
 
+    RefreshDesktopIconSnapshot();
+    std::vector<Desktop::DesktopIcon> originalTargets = BuildOriginalIconsFromManagedFences();
+    if (originalTargets.empty()) {
+        originalTargets = originalDesktopIcons_;
+    }
+    if (originalTargets.empty()) {
+        desktopIconReadStatus_ = L"Restore failed: no original snapshot available.";
+        lastGridMoveSummary_ = L"Restore failed: no original snapshot available.";
+        Infrastructure::Logger::Get().Error(L"[DesktopMove] restore skipped: no original snapshot.");
+        UpdateDiagnosticsTextControl();
+        return false;
+    }
+
     const int movedCount = desktopIconService_.MoveDesktopIcons(
         desktopResolveResult_.listViewWindow,
         desktopResolveResult_.explorerProcessId,
-        originalDesktopIcons_);
-    const int expected = static_cast<int>(originalDesktopIcons_.size());
+        originalTargets);
+    const int expected = static_cast<int>(originalTargets.size());
 
     Infrastructure::Logger::Get().Info(
         L"[DesktopMove] restore result. moved=" + std::to_wstring(movedCount) +
@@ -1246,6 +1445,11 @@ bool AppController::RestoreOriginalDesktopLayout() {
 
     RefreshDesktopIconSnapshot();
     PersistIconSnapshot(L"after_restore", L"auto");
+    managedFences_.clear();
+    temporarySelection_.active = false;
+    pendingFenceCreation_.reset();
+    activeFenceId_.reset();
+    UpdateOverlayWindow();
     if (movedCount == expected) {
         desktopIconReadStatus_ = L"Restore completed.";
         lastGridMoveSummary_ = L"Restore completed: " +
@@ -1311,7 +1515,7 @@ void AppController::HandleSelectionCanceled() {
     PostMessageW(mainWindow_, WM_APP + 103, 0, 0);
 }
 
-bool AppController::ShouldStartSelectionAt(const POINT& point) const {
+bool AppController::ShouldStartSelectionAt(const POINT& point) {
     if (!isDesktopConnected_ ||
         desktopResolveResult_.listViewWindow == nullptr ||
         !IsWindow(desktopResolveResult_.listViewWindow) ||
@@ -1319,6 +1523,16 @@ bool AppController::ShouldStartSelectionAt(const POINT& point) const {
         return false;
     }
 
+    if (const std::optional<long long> fenceId = FindManagedFenceIdAtPoint(point); fenceId.has_value()) {
+        SetActiveFence(*fenceId);
+        Infrastructure::Logger::Get().Info(
+            L"[Selection] ignored new selection start inside managed fence. fenceId=" +
+            std::to_wstring(*fenceId) +
+            L"; point=" + PointToString(point));
+        return false;
+    }
+
+    SetActiveFence(std::nullopt);
     return desktopIconService_.HitTestDesktopIcon(
                desktopResolveResult_.listViewWindow,
                desktopResolveResult_.explorerProcessId,
@@ -1361,24 +1575,27 @@ void AppController::ConfirmSelectionRect(const RECT& selectionRect, const POINT&
     const int height = selectionRect.bottom - selectionRect.top;
     if (width < kSelectionMinWidth || height < kSelectionMinHeight) {
         desktopIconReadStatus_ = L"Selection canceled: area too small.";
-        hasPendingSelectionRect_ = false;
+        temporarySelection_.active = false;
+        pendingFenceCreation_.reset();
         overlayWindow_.ClearSelectionRect();
         UpdateDiagnosticsTextControl();
         return;
     }
 
-    pendingSelectionRect_ = selectionRect;
-    hasPendingSelectionRect_ = true;
+    temporarySelection_.active = false;
+    pendingFenceCreation_ = PendingFenceCreationState{
+        selectionRect,
+        anchorPoint};
     overlayWindow_.ShowSelectionConfirm(selectionRect, anchorPoint);
 }
 
 void AppController::HandleSelectionConfirmDecision(bool confirmed) {
-    if (!hasPendingSelectionRect_) {
+    if (!pendingFenceCreation_.has_value()) {
         return;
     }
 
-    const RECT selectionRect = pendingSelectionRect_;
-    hasPendingSelectionRect_ = false;
+    const RECT selectionRect = pendingFenceCreation_->selectionRect;
+    pendingFenceCreation_.reset();
     if (confirmed) {
         ApplyFenceFromSelectionRect(selectionRect);
         return;
@@ -1388,13 +1605,15 @@ void AppController::HandleSelectionConfirmDecision(bool confirmed) {
 
 void AppController::CancelSelectionRect() {
     overlayWindow_.ClearSelectionRect();
-    hasPendingSelectionRect_ = false;
+    temporarySelection_.active = false;
+    pendingFenceCreation_.reset();
     desktopIconReadStatus_ = L"Selection canceled.";
     UpdateDiagnosticsTextControl();
 }
 
 void AppController::ApplyFenceFromSelectionRect(const RECT& selectionRect) {
     overlayWindow_.ClearSelectionRect();
+    temporarySelection_.active = false;
 
     if (!EnsureDesktopConnection()) {
         desktopIconReadStatus_ = L"Selection failed: desktop connection unavailable.";
@@ -1407,6 +1626,7 @@ void AppController::ApplyFenceFromSelectionRect(const RECT& selectionRect) {
     const std::vector<Desktop::DesktopIcon> selectedIcons = CollectIconsInRect(selectionRect);
     const std::vector<Desktop::DesktopIcon> movedIcons =
         BuildIconsForFenceLayout(selectedIcons, fenceRect);
+    long long createdFenceId = 0;
 
     int movedCount = 0;
     if (!movedIcons.empty()) {
@@ -1418,19 +1638,26 @@ void AppController::ApplyFenceFromSelectionRect(const RECT& selectionRect) {
 
     overlayWindow_.SetFenceRect(fenceRect);
     if (!selectedIcons.empty() && !movedIcons.empty()) {
-        SaveFenceSelection(fenceRect, selectedIcons, movedIcons);
+        createdFenceId = SaveFenceSelection(fenceRect, selectedIcons, movedIcons);
     } else if (persistenceReady_) {
         // Keep empty rectangle as a valid fence even when no icons were hit.
         Persistence::FenceRecord fence{};
         fence.name = L"Desktop Group";
         fence.bounds = fenceRect;
         fence.styleJson = L"{\"source\":\"drag-selection\",\"empty\":true}";
-        const long long fenceId = fenceRepository_.CreateFence(fence);
-        if (fenceId > 0) {
-            (void)fenceRepository_.ReplaceFenceIcons(fenceId, {});
+        createdFenceId = fenceRepository_.CreateFence(fence);
+        if (createdFenceId > 0) {
+            (void)fenceRepository_.ReplaceFenceIcons(createdFenceId, {});
         }
     }
 
+    ReloadManagedFences();
+    if (createdFenceId > 0) {
+        SetActiveFence(createdFenceId);
+    } else {
+        UpdateOverlayWindow();
+        UpdateDiagnosticsTextControl();
+    }
     RefreshDesktopIconSnapshot();
     if (selectedIcons.empty()) {
         desktopIconReadStatus_ = L"Selection applied: rectangle saved (no icons in region).";
@@ -1531,12 +1758,12 @@ std::vector<Desktop::DesktopIcon> AppController::BuildIconsForFenceLayout(
     return moved;
 }
 
-void AppController::SaveFenceSelection(
+long long AppController::SaveFenceSelection(
     const RECT& fenceRect,
     const std::vector<Desktop::DesktopIcon>& originalIcons,
     const std::vector<Desktop::DesktopIcon>& movedIcons) {
     if (!persistenceReady_) {
-        return;
+        return 0;
     }
 
     Persistence::FenceRecord fence{};
@@ -1546,7 +1773,7 @@ void AppController::SaveFenceSelection(
     const long long fenceId = fenceRepository_.CreateFence(fence);
     if (fenceId <= 0) {
         Infrastructure::Logger::Get().Error(L"[Selection] failed to persist fence.");
-        return;
+        return 0;
     }
 
     std::unordered_map<int, Desktop::DesktopIcon> originalByIndex;
@@ -1577,13 +1804,14 @@ void AppController::SaveFenceSelection(
 
     if (!fenceRepository_.ReplaceFenceIcons(fenceId, rows)) {
         Infrastructure::Logger::Get().Error(L"[Selection] failed to persist fence icons.");
-        return;
+        return 0;
     }
 
     Infrastructure::Logger::Get().Info(
         L"[Selection] fence persisted. id=" + std::to_wstring(fenceId) +
         L"; iconCount=" + std::to_wstring(rows.size()) +
         L"; rect=" + RectToString(fenceRect));
+    return fenceId;
 }
 
 void AppController::LogDesktopResolveDiagnostics() const {
@@ -1674,10 +1902,40 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
     text += L"Read Status: " + desktopIconReadStatus_ + L"\r\n";
     text += L"Batch Move Summary: " + lastGridMoveSummary_ + L"\r\n";
     text += L"Persistence: " + std::wstring(persistenceReady_ ? L"ready" : L"not ready") + L"\r\n";
+    text += L"Managed Fences: " + std::to_wstring(managedFences_.size()) + L"\r\n";
+    text += L"Active Fence: ";
+    if (activeFenceId_.has_value()) {
+        text += std::to_wstring(*activeFenceId_);
+        if (const std::optional<size_t> activeIndex = FindManagedFenceIndexById(*activeFenceId_);
+            activeIndex.has_value()) {
+            const ManagedFenceState& activeFence = managedFences_[*activeIndex];
+            text += L" | ";
+            text += activeFence.record.name.empty() ? L"Desktop Group" : activeFence.record.name;
+            text += L" | icons=" + std::to_wstring(activeFence.icons.size());
+            text += L" | bounds=" + RectToString(activeFence.record.bounds);
+        }
+    } else {
+        text += L"none";
+    }
+    text += L"\r\n";
     if (persistenceReady_) {
         text += L"Database Path: " + database_.DatabasePath().wstring() + L"\r\n";
     } else if (!database_.LastError().empty()) {
         text += L"Database Error: " + database_.LastError() + L"\r\n";
+    }
+    if (!managedFences_.empty()) {
+        text += L"Fence List:\r\n";
+        const size_t sampleFenceCount = std::min<size_t>(managedFences_.size(), 12);
+        for (size_t i = 0; i < sampleFenceCount; ++i) {
+            const ManagedFenceState& managedFence = managedFences_[i];
+            text += L"  [" + std::to_wstring(i) + L"] id=" + std::to_wstring(managedFence.record.id);
+            if (activeFenceId_.has_value() && managedFence.record.id == *activeFenceId_) {
+                text += L" *active*";
+            }
+            text += L" name=" + (managedFence.record.name.empty() ? std::wstring(L"Desktop Group") : managedFence.record.name);
+            text += L" icons=" + std::to_wstring(managedFence.icons.size());
+            text += L" bounds=" + RectToString(managedFence.record.bounds) + L"\r\n";
+        }
     }
     text += L"Original Snapshot Count: " + std::to_wstring(originalDesktopIcons_.size()) + L"\r\n";
     if (!desktopIcons_.empty()) {

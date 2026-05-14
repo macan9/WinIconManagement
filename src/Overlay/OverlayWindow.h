@@ -3,6 +3,9 @@
 #include <windows.h>
 
 #include <functional>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace Overlay {
 class OverlayWindow {
@@ -24,7 +27,9 @@ public:
     void Show();
     void Hide();
     void SetFixedMode(bool fixedMode);
+    void SetFenceRects(const std::vector<RECT>& fenceRects);
     void SetFenceRect(const RECT& fenceRect);
+    void SetFencePresentation(const std::vector<std::wstring>& fenceTitles, std::optional<size_t> activeFenceIndex);
     void SetVirtualDesktopRect(const RECT& virtualDesktopRect);
     void SetDesktopHostWindow(HWND desktopHostWindow);
     void SetSelectionRect(const RECT& selectionRect);
@@ -50,6 +55,7 @@ private:
     [[nodiscard]] bool CreateOverlayWindow();
     void ApplyRoundedRegion();
     void ApplyClickThroughStyle();
+    void NormalizeFenceRects();
     void NormalizeFenceRect();
     void EnsureDesktopLayerZOrder() const;
     void Paint(HWND hwnd);
@@ -66,6 +72,9 @@ private:
     HWND window_;
     HWND desktopHostWindow_;
     RECT virtualDesktopRect_;
+    std::vector<RECT> fenceRects_;
+    std::vector<std::wstring> fenceTitles_;
+    std::optional<size_t> activeFenceIndex_;
     RECT fenceRect_;
     RECT selectionRect_;
     bool hasSelectionRect_;

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,21 @@ public:
     int Run();
 
 private:
+    struct ManagedFenceState {
+        Persistence::FenceRecord record;
+        std::vector<Persistence::FenceIconRecord> icons;
+    };
+
+    struct TemporarySelectionState {
+        bool active = false;
+        RECT rect{0, 0, 0, 0};
+    };
+
+    struct PendingFenceCreationState {
+        RECT selectionRect{0, 0, 0, 0};
+        POINT anchorPoint{0, 0};
+    };
+
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     void HandleCommand(HWND hwnd, WORD commandId);
@@ -47,11 +63,18 @@ private:
     bool InitializePersistence();
     void PersistBasicSettings();
     void PersistIconSnapshot(const std::wstring& name, const std::wstring& source);
+    void ReloadManagedFences();
+    [[nodiscard]] std::optional<long long> FindManagedFenceIdAtPoint(const POINT& point) const;
+    [[nodiscard]] std::optional<size_t> FindManagedFenceIndexById(long long fenceId) const;
+    void SetActiveFence(std::optional<long long> fenceId);
+    [[nodiscard]] std::vector<Desktop::DesktopIcon> BuildOriginalIconsFromManagedFences() const;
+    [[nodiscard]] std::vector<Desktop::DesktopIcon> BuildManagedFenceLayoutTargets() const;
+    bool RestoreManagedFenceLayout(bool refreshFenceStateAfterMove);
     void HandleSelectionStarted(const POINT& startPoint);
     void HandleSelectionUpdated(const RECT& selectionRect);
     void HandleSelectionCompleted(const RECT& selectionRect, const POINT& releasePoint);
     void HandleSelectionCanceled();
-    [[nodiscard]] bool ShouldStartSelectionAt(const POINT& point) const;
+    [[nodiscard]] bool ShouldStartSelectionAt(const POINT& point);
     bool HandleSelectionConfirmMouseFilter(WPARAM message, const POINT& point);
     void ConfirmSelectionRect(const RECT& selectionRect, const POINT& anchorPoint);
     void HandleSelectionConfirmDecision(bool confirmed);
@@ -62,10 +85,12 @@ private:
     [[nodiscard]] std::vector<Desktop::DesktopIcon> BuildIconsForFenceLayout(
         const std::vector<Desktop::DesktopIcon>& selectedIcons,
         const RECT& fenceRect) const;
-    void SaveFenceSelection(
+    [[nodiscard]] long long SaveFenceSelection(
         const RECT& fenceRect,
         const std::vector<Desktop::DesktopIcon>& originalIcons,
         const std::vector<Desktop::DesktopIcon>& movedIcons);
+    [[nodiscard]] RECT BuildDefaultFenceRect() const;
+    [[nodiscard]] RECT GetPrimaryOverlayFenceRect() const;
     bool MoveTestDesktopIcon();
     bool RestoreOriginalDesktopLayout();
     void UpdateWindowTitle();
@@ -85,8 +110,10 @@ private:
     int desktopIconCount_;
     std::vector<Desktop::DesktopIcon> desktopIcons_;
     std::vector<Desktop::DesktopIcon> originalDesktopIcons_;
-    RECT pendingSelectionRect_;
-    bool hasPendingSelectionRect_;
+    std::vector<ManagedFenceState> managedFences_;
+    TemporarySelectionState temporarySelection_;
+    std::optional<PendingFenceCreationState> pendingFenceCreation_;
+    std::optional<long long> activeFenceId_;
     std::wstring desktopIconReadStatus_;
     std::wstring lastGridMoveSummary_;
     Persistence::Database database_;
