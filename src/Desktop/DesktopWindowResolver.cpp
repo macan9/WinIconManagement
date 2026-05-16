@@ -143,13 +143,6 @@ void FillBackgroundAnchor(Desktop::DesktopResolveResult* result) {
     result->backgroundAnchorClassName = L"<null>";
     result->backgroundAnchorStrategy = L"none";
 
-    if (result->shellDefViewWindow != nullptr && IsWindow(result->shellDefViewWindow)) {
-        result->backgroundAnchorWindow = result->shellDefViewWindow;
-        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
-        result->backgroundAnchorStrategy = L"ShellDefView";
-        return;
-    }
-
     if (result->workerWindowAfterDefView != nullptr && IsWindow(result->workerWindowAfterDefView)) {
         result->backgroundAnchorWindow = result->workerWindowAfterDefView;
         result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
@@ -168,6 +161,13 @@ void FillBackgroundAnchor(Desktop::DesktopResolveResult* result) {
         result->backgroundAnchorWindow = result->progmanWindow;
         result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
         result->backgroundAnchorStrategy = L"ProgmanFallback";
+        return;
+    }
+
+    if (result->shellDefViewWindow != nullptr && IsWindow(result->shellDefViewWindow)) {
+        result->backgroundAnchorWindow = result->shellDefViewWindow;
+        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
+        result->backgroundAnchorStrategy = L"ShellDefViewLastResort";
     }
 }
 }  // namespace

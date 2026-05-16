@@ -32,9 +32,12 @@ private:
     [[nodiscard]] bool RegisterClass() const;
     [[nodiscard]] bool CreateBackgroundWindow();
     [[nodiscard]] bool EnsureWindowCreated();
+    void DestroyWindowHandle();
     void EnsureDesktopLayerZOrder() const;
     void UpdateWindowBounds();
     void ApplyFenceRegion();
+    void PaintNow();
+    void RenderContent(HDC hdc, const RECT& clientRect, const RECT& paintRect) const;
     void Paint(HWND hwnd);
 
     HINSTANCE instance_;

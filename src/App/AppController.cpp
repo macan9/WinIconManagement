@@ -19,8 +19,6 @@ constexpr wchar_t kMainWindowClassName[] = L"WinIconManagement.MainWindow";
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT_PTR kDesktopHealthTimerId = 1;
 constexpr UINT kDesktopHealthIntervalMs = 3000;
-constexpr int kDesktopBackgroundStableTickThreshold = 2;
-constexpr int kDesktopBackgroundRetryLimit = 4;
 constexpr UINT kDefaultDpi = 96;
 constexpr int kGridPaddingPixels = 16;
 constexpr int kMinimumGridSpacing = 48;
@@ -595,11 +593,6 @@ AppController::AppController(HINSTANCE instance)
       isExiting_(false),
       isDesktopConnected_(false),
       shouldRestoreManagedFences_(false),
-      backgroundListViewCandidate_(nullptr),
-      backgroundListViewStableTicks_(0),
-      desktopBackgroundApplyPending_(true),
-      desktopBackgroundApplyRetryCount_(0),
-      desktopBackgroundFallbackNeeded_(false),
       windowResourcesCleanedUp_(false),
       desktopControlMode_(DesktopControlMode::ExplorerDriven) {}
 
@@ -652,9 +645,6 @@ bool AppController::Initialize() {
     }
     if (!backgroundWindow_.Initialize(instance_, nullptr)) {
         Infrastructure::Logger::Get().Error(L"[Background] initialization failed.");
-    } else {
-        UpdateBackgroundWindow();
-        backgroundWindow_.Show();
     }
     // Overlay runs as an independent top-level window and should not be owned by main window.
     if (!overlayWindow_.Initialize(instance_, nullptr)) {
@@ -666,8 +656,6 @@ bool AppController::Initialize() {
             [this](const RECT& updatedRect) { (void)UpdateActiveFenceBounds(updatedRect); });
         overlayWindow_.SetActiveFenceDeleteCallback(
             [this]() { (void)DeleteActiveFence(); });
-        UpdateOverlayWindow();
-        overlayWindow_.Show();
     }
 
     mouseController_.SetCallbacks(
@@ -1563,62 +1551,11 @@ void AppController::UpdateOverlayWindow() {
 
 bool AppController::UpdateBackgroundWindow() {
     const DisplayDiagnostics display = CollectDisplayDiagnostics();
-    desktopBackgroundRenderer_.SetVirtualDesktopRect(display.virtualDesktopRect);
 
     std::vector<RECT> backgroundFenceRects;
     backgroundFenceRects.reserve(managedFences_.size());
     for (const ManagedFenceState& managedFence : managedFences_) {
         backgroundFenceRects.push_back(managedFence.record.bounds);
-    }
-    desktopBackgroundRenderer_.SetFenceRects(backgroundFenceRects);
-    bool backgroundApplied = false;
-    if (desktopResolveResult_.listViewWindow != nullptr && IsWindow(desktopResolveResult_.listViewWindow)) {
-        const bool isSameCandidate = backgroundListViewCandidate_ == desktopResolveResult_.listViewWindow;
-        if (!isSameCandidate) {
-            backgroundListViewCandidate_ = desktopResolveResult_.listViewWindow;
-            backgroundListViewStableTicks_ = 0;
-            desktopBackgroundApplyPending_ = true;
-            desktopBackgroundApplyRetryCount_ = 0;
-            desktopBackgroundFallbackNeeded_ = false;
-        } else if (backgroundListViewStableTicks_ < kDesktopBackgroundStableTickThreshold) {
-            ++backgroundListViewStableTicks_;
-        }
-
-        if (!desktopBackgroundFallbackNeeded_ &&
-            desktopBackgroundApplyPending_ &&
-            backgroundListViewStableTicks_ >= kDesktopBackgroundStableTickThreshold) {
-            backgroundApplied = desktopBackgroundRenderer_.ApplyToListView(desktopResolveResult_.listViewWindow);
-            if (backgroundApplied) {
-                desktopBackgroundApplyPending_ = false;
-                desktopBackgroundApplyRetryCount_ = 0;
-                desktopBackgroundFallbackNeeded_ = false;
-            } else {
-                ++desktopBackgroundApplyRetryCount_;
-                if (desktopBackgroundApplyRetryCount_ >= kDesktopBackgroundRetryLimit) {
-                    desktopBackgroundFallbackNeeded_ = true;
-                    desktopBackgroundApplyPending_ = false;
-                    Infrastructure::Logger::Get().Error(
-                        L"[DesktopBackground] switching to fallback path after repeated apply failures.");
-                }
-            }
-        }
-
-        Infrastructure::Logger::Get().Info(
-            L"[DesktopBackground] apply attempt. listView=0x" +
-            std::to_wstring(reinterpret_cast<uintptr_t>(desktopResolveResult_.listViewWindow)) +
-            L"; applied=" + std::wstring(backgroundApplied ? L"true" : L"false") +
-            L"; stableTicks=" + std::to_wstring(backgroundListViewStableTicks_) +
-            L"; pending=" + std::wstring(desktopBackgroundApplyPending_ ? L"true" : L"false") +
-            L"; retry=" + std::to_wstring(desktopBackgroundApplyRetryCount_) +
-            L"; fallbackNeeded=" + std::wstring(desktopBackgroundFallbackNeeded_ ? L"true" : L"false"));
-    } else {
-        desktopBackgroundRenderer_.ClearFromListView(desktopResolveResult_.listViewWindow);
-        backgroundListViewCandidate_ = nullptr;
-        backgroundListViewStableTicks_ = 0;
-        desktopBackgroundApplyPending_ = true;
-        desktopBackgroundApplyRetryCount_ = 0;
-        desktopBackgroundFallbackNeeded_ = false;
-        Infrastructure::Logger::Get().Info(L"[DesktopBackground] apply skipped: listView unavailable in controller.");
     }
 
     if (desktopResolveResult_.backgroundAnchorWindow != nullptr &&
@@ -1639,29 +1576,15 @@ bool AppController::UpdateBackgroundWindow() {
     Infrastructure::Logger::Get().Info(
         L"[Background] UpdateBackgroundWindow fenceCount=" + std::to_wstring(backgroundFenceRects.size()) +
         L"; anchorStrategy=" + desktopResolveResult_.backgroundAnchorStrategy);
-    ApplyBackgroundFallbackState();
-    return backgroundApplied;
-}
-
-void AppController::ApplyBackgroundFallbackState() {
-    if (!backgroundWindow_.IsInitialized()) {
-        return;
+    if (backgroundFenceRects.empty()) {
+        backgroundWindow_.Hide();
+        Infrastructure::Logger::Get().Info(L"[Background] no managed fences: hide background window.");
+        return false;
     }
 
-    if (desktopBackgroundFallbackNeeded_) {
-        backgroundWindow_.Show();
-        Infrastructure::Logger::Get().Info(L"[Background] fallback path active: using local background window.");
-        return;
-    }
-
-    if (desktopBackgroundApplyPending_) {
-        backgroundWindow_.Show();
-        Infrastructure::Logger::Get().Info(L"[Background] probe path active: keeping local background window visible.");
-        return;
-    }
-
-    backgroundWindow_.Hide();
-    Infrastructure::Logger::Get().Info(L"[Background] primary desktop background path active: local background window hidden.");
+    backgroundWindow_.Show();
+    Infrastructure::Logger::Get().Info(L"[Background] primary path active: using BackgroundWindow as real desktop background layer.");
+    return true;
 }
 
 void AppController::CleanupWindowResources(HWND windowHandle) {
@@ -1676,7 +1599,6 @@ void AppController::CleanupWindowResources(HWND windowHandle) {
     if (windowHandle != nullptr && IsWindow(windowHandle)) {
         KillTimer(windowHandle, desktopHealthTimerId_);
     }
-    desktopBackgroundRenderer_.Destroy();
     backgroundWindow_.Destroy();
     overlayWindow_.Destroy();
     trayIcon_.Remove();
@@ -1765,8 +1687,6 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
                     Infrastructure::Logger::Get().Info(L"Desktop window handle invalid, reconnecting.");
                     ResolveDesktopWindows(false);
                     UpdateWindowTitle();
-                } else if (desktopBackgroundApplyPending_) {
-                    (void)UpdateBackgroundWindow();
                 }
                 return 0;
             }
@@ -2014,7 +1934,6 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
 
     if (isDesktopConnected_) {
         ApplyExplorerDrivenRuntimeState(fromManualReconnect);
-        desktopBackgroundApplyPending_ = true;
         (void)UpdateBackgroundWindow();
         UpdateOverlayWindow();
         if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
