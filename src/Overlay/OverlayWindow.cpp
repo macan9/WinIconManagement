@@ -72,6 +72,7 @@ OverlayWindow::OverlayWindow()
       fixedMode_(true),
       visible_(false),
       paintLogged_(false),
+      currentLayeredAlpha_(0),
       hoverHitTarget_(InteractionHitTarget::Transparent),
       activeFenceDragMode_(ActiveFenceDragMode::None),
       activeFenceDragStartPoint_{0, 0},
@@ -142,6 +143,7 @@ void OverlayWindow::Hide() {
 void OverlayWindow::SetFixedMode(bool fixedMode) {
     fixedMode_ = fixedMode;
     if (IsInitialized()) {
+        ApplyLayeredAttributes();
         ApplyClickThroughStyle();
         InvalidateRect(window_, nullptr, TRUE);
     }
@@ -230,12 +232,26 @@ void OverlayWindow::SetDesktopHostWindow(HWND desktopHostWindow) {
 }
 
 void OverlayWindow::SetSelectionRect(const RECT& selectionRect) {
-    selectionRect_ = selectionRect;
+    RECT normalizedSelectionRect = selectionRect;
+    if (normalizedSelectionRect.left > normalizedSelectionRect.right) {
+        std::swap(normalizedSelectionRect.left, normalizedSelectionRect.right);
+    }
+    if (normalizedSelectionRect.top > normalizedSelectionRect.bottom) {
+        std::swap(normalizedSelectionRect.top, normalizedSelectionRect.bottom);
+    }
+
+    if (hasSelectionRect_ && EqualRect(&selectionRect_, &normalizedSelectionRect) != FALSE) {
+        return;
+    }
+
+    RECT previousSelectionRect = selectionRect_;
+    const bool hadSelectionRect = hasSelectionRect_;
+    selectionRect_ = normalizedSelectionRect;
     hasSelectionRect_ = true;
-    NormalizeSelectionRect();
     if (IsInitialized()) {
         ApplyRoundedRegion();
-        InvalidateRect(window_, nullptr, TRUE);
+        ApplyLayeredAttributes();
+        InvalidateSelectionRectDelta(hadSelectionRect ? &previousSelectionRect : nullptr);
     }
 }
 
@@ -243,6 +259,8 @@ void OverlayWindow::ClearSelectionRect() {
     if (!hasSelectionRect_ && !selectionConfirmVisible_) {
         return;
     }
+    RECT previousSelectionRect = selectionRect_;
+    const bool hadSelectionRect = hasSelectionRect_;
     hasSelectionRect_ = false;
     selectionConfirmVisible_ = false;
     selectionConfirmAction_ = SelectionConfirmAction::None;
@@ -251,9 +269,16 @@ void OverlayWindow::ClearSelectionRect() {
     selectionConfirmRect_ = RECT{0, 0, 0, 0};
     hoverHitTarget_ = InteractionHitTarget::Transparent;
     if (IsInitialized()) {
+        ApplyLayeredAttributes();
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
-        InvalidateRect(window_, nullptr, TRUE);
+        if (selectionConfirmVisible_) {
+            InvalidateRect(window_, nullptr, FALSE);
+        } else if (hadSelectionRect) {
+            InvalidateSelectionRectDelta(&previousSelectionRect);
+        } else {
+            InvalidateRect(window_, nullptr, FALSE);
+        }
     }
 }
 
@@ -268,6 +293,7 @@ void OverlayWindow::ShowSelectionConfirm(const RECT& selectionRect, const POINT&
     selectionConfirmHoverAction_ = SelectionConfirmAction::None;
     hoverHitTarget_ = InteractionHitTarget::Transparent;
     if (IsInitialized()) {
+        ApplyLayeredAttributes();
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
         InvalidateRect(window_, nullptr, TRUE);
@@ -284,6 +310,7 @@ void OverlayWindow::HideSelectionConfirm() {
     selectionConfirmRect_ = RECT{0, 0, 0, 0};
     hoverHitTarget_ = InteractionHitTarget::Transparent;
     if (IsInitialized()) {
+        ApplyLayeredAttributes();
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
         InvalidateRect(window_, nullptr, TRUE);
@@ -449,7 +476,7 @@ LRESULT OverlayWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
 bool OverlayWindow::RegisterClass() const {
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
-    windowClass.style = CS_HREDRAW | CS_VREDRAW;
+    windowClass.style = 0;
     windowClass.lpfnWndProc = &OverlayWindow::WindowProc;
     windowClass.hInstance = instance_;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -496,11 +523,7 @@ bool OverlayWindow::CreateOverlayWindow() {
         return false;
     }
 
-    const BYTE alpha = static_cast<BYTE>(fixedMode_ ? kFenceFillAlpha : (kFenceFillAlpha + 20));
-    if (!SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA | LWA_COLORKEY)) {
-        Infrastructure::Logger::Get().Error(
-            L"[Overlay] SetLayeredWindowAttributes failed. error=" + std::to_wstring(GetLastError()));
-    }
+    ApplyLayeredAttributes();
     Infrastructure::Logger::Get().Info(
         L"[Overlay] CreateWindowExW success. hwnd=0x" +
         std::to_wstring(reinterpret_cast<uintptr_t>(window_)) +
@@ -537,6 +560,28 @@ void OverlayWindow::ApplyClickThroughStyle() {
     EnsureDesktopLayerZOrder();
     Infrastructure::Logger::Get().Info(
         L"[Overlay] ApplyClickThroughStyle: exStyle=" + std::to_wstring(static_cast<unsigned long long>(extendedStyle)));
+}
+
+void OverlayWindow::ApplyLayeredAttributes() {
+    if (!IsInitialized()) {
+        return;
+    }
+
+    BYTE alpha = static_cast<BYTE>(fixedMode_ ? 255 : std::max<BYTE>(kSelectionOnlyAlpha, kFenceEditFillAlpha));
+    if (hasSelectionRect_) {
+        alpha = std::max(alpha, kSelectionOnlyAlpha);
+    }
+
+    if (currentLayeredAlpha_ == alpha) {
+        return;
+    }
+
+    if (!SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA | LWA_COLORKEY)) {
+        Infrastructure::Logger::Get().Error(
+            L"[Overlay] SetLayeredWindowAttributes failed. error=" + std::to_wstring(GetLastError()));
+        return;
+    }
+    currentLayeredAlpha_ = alpha;
 }
 
 void OverlayWindow::NormalizeFenceRect() {
@@ -579,6 +624,38 @@ void OverlayWindow::NormalizeFenceRects() {
     fenceRect_ = fenceRects_.front();
 }
 
+RECT OverlayWindow::SelectionRectToLocalRect(const RECT& screenRect) const {
+    return RECT{
+        screenRect.left - virtualDesktopRect_.left,
+        screenRect.top - virtualDesktopRect_.top,
+        screenRect.right - virtualDesktopRect_.left,
+        screenRect.bottom - virtualDesktopRect_.top};
+}
+
+RECT OverlayWindow::ExpandRectForSelectionStroke(const RECT& rect) const {
+    RECT expanded = rect;
+    InflateRect(&expanded, kSelectionBorderWidth + 2, kSelectionBorderWidth + 2);
+    return expanded;
+}
+
+void OverlayWindow::InvalidateSelectionRectDelta(const RECT* previousSelectionRect) {
+    if (!IsInitialized()) {
+        return;
+    }
+
+    if (previousSelectionRect != nullptr) {
+        RECT previousLocalRect = SelectionRectToLocalRect(*previousSelectionRect);
+        previousLocalRect = ExpandRectForSelectionStroke(previousLocalRect);
+        InvalidateRect(window_, &previousLocalRect, FALSE);
+    }
+
+    if (hasSelectionRect_) {
+        RECT currentLocalRect = SelectionRectToLocalRect(selectionRect_);
+        currentLocalRect = ExpandRectForSelectionStroke(currentLocalRect);
+        InvalidateRect(window_, &currentLocalRect, FALSE);
+    }
+}
+
 void OverlayWindow::EnsureDesktopLayerZOrder() const {
     if (!IsInitialized()) {
         return;
@@ -606,9 +683,14 @@ void OverlayWindow::Paint(HWND hwnd) {
 
     RECT clientRect{};
     GetClientRect(hwnd, &clientRect);
-    // Fill with colorkey so untouched overlay area stays visually transparent.
+    RECT paintRect = paint.rcPaint;
+    if (IsRectEmpty(&paintRect)) {
+        paintRect = clientRect;
+    }
+
+    // Fill only the invalid region with the colorkey so drag updates don't clear the whole desktop-sized overlay.
     HBRUSH clearBrush = CreateSolidBrush(RGB(0, 0, 0));
-    FillRect(hdc, &clientRect, clearBrush);
+    FillRect(hdc, &paintRect, clearBrush);
     DeleteObject(clearBrush);
 
     if (!hasSelectionRect_ && !fenceRects_.empty()) {
@@ -689,9 +771,8 @@ void OverlayWindow::Paint(HWND hwnd) {
             selectionRect_.right - virtualDesktopRect_.left,
             selectionRect_.bottom - virtualDesktopRect_.top};
 
-        HBRUSH selectionFill = CreateSolidBrush(kSelectionFillColor);
         HPEN selectionBorder = CreatePen(PS_SOLID, kSelectionBorderWidth, kSelectionBorderColor);
-        HGDIOBJ oldSelectionBrush = SelectObject(hdc, selectionFill);
+        HGDIOBJ oldSelectionBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
         HGDIOBJ oldSelectionPen = SelectObject(hdc, selectionBorder);
         Rectangle(
             hdc,
@@ -702,7 +783,6 @@ void OverlayWindow::Paint(HWND hwnd) {
         SelectObject(hdc, oldSelectionPen);
         SelectObject(hdc, oldSelectionBrush);
         DeleteObject(selectionBorder);
-        DeleteObject(selectionFill);
     }
 
     if (selectionConfirmVisible_) {
@@ -711,19 +791,13 @@ void OverlayWindow::Paint(HWND hwnd) {
 
     EndPaint(hwnd, &paint);
 
-    BYTE alpha = static_cast<BYTE>(fixedMode_ ? 255 : std::max<BYTE>(kSelectionOnlyAlpha, kFenceEditFillAlpha));
-    if (hasSelectionRect_) {
-        alpha = std::max(alpha, kSelectionOnlyAlpha);
-    }
-    SetLayeredWindowAttributes(window_, RGB(0, 0, 0), alpha, LWA_ALPHA | LWA_COLORKEY);
-
     if (!paintLogged_) {
         paintLogged_ = true;
         Infrastructure::Logger::Get().Info(
             L"[Overlay] WM_PAINT first frame. clientSize=" +
             std::to_wstring(clientRect.right - clientRect.left) + L"x" +
             std::to_wstring(clientRect.bottom - clientRect.top) +
-            L"; alpha=" + std::to_wstring(alpha));
+            L"; alpha=" + std::to_wstring(currentLayeredAlpha_));
     }
 }
 

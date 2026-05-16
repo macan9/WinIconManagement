@@ -1542,16 +1542,12 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
 
     switch (message) {
         case WM_APP + 100:
-            temporarySelection_.active = false;
-            pendingFenceCreation_.reset();
-            overlayWindow_.ClearSelectionRect();
+            ApplySelectionStartedOnUiThread();
             return 0;
         case WM_APP + 101: {
             const auto* selectionRect = reinterpret_cast<RECT*>(lParam);
             if (selectionRect != nullptr) {
-                temporarySelection_.active = true;
-                temporarySelection_.rect = *selectionRect;
-                overlayWindow_.SetSelectionRect(*selectionRect);
+                ApplySelectionUpdatedOnUiThread(*selectionRect);
                 delete selectionRect;
             }
             return 0;
@@ -1562,14 +1558,12 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
                 const RECT completedRect = payload->rect;
                 const POINT releasePoint = payload->releasePoint;
                 delete payload;
-                ConfirmSelectionRect(completedRect, releasePoint);
+                ApplySelectionCompletedOnUiThread(completedRect, releasePoint);
             }
             return 0;
         }
         case WM_APP + 103:
-            temporarySelection_.active = false;
-            pendingFenceCreation_.reset();
-            overlayWindow_.ClearSelectionRect();
+            ApplySelectionCanceledOnUiThread();
             return 0;
         case WM_COMMAND:
             HandleCommand(hwnd, LOWORD(wParam));
@@ -2173,6 +2167,10 @@ void AppController::HandleSelectionStarted(const POINT&) {
         return;
     }
     Infrastructure::Logger::Get().Info(L"[Selection] started.");
+    if (IsOnMainUiThread()) {
+        ApplySelectionStartedOnUiThread();
+        return;
+    }
     PostMessageW(mainWindow_, WM_APP + 100, 0, 0);
 }
 
@@ -2191,6 +2189,10 @@ void AppController::HandleSelectionUpdated(const RECT& selectionRect) {
             std::to_wstring(selectionRect.right) + L"," +
             std::to_wstring(selectionRect.bottom) + L"]");
     }
+    if (IsOnMainUiThread()) {
+        ApplySelectionUpdatedOnUiThread(selectionRect);
+        return;
+    }
     auto* rectCopy = new RECT(selectionRect);
     PostMessageW(mainWindow_, WM_APP + 101, 0, reinterpret_cast<LPARAM>(rectCopy));
 }
@@ -2205,6 +2207,10 @@ void AppController::HandleSelectionCompleted(const RECT& selectionRect, const PO
         std::to_wstring(selectionRect.top) + L"]-[" +
         std::to_wstring(selectionRect.right) + L"," +
         std::to_wstring(selectionRect.bottom) + L"]");
+    if (IsOnMainUiThread()) {
+        ApplySelectionCompletedOnUiThread(selectionRect, releasePoint);
+        return;
+    }
     auto* payload = new SelectionCompletePayload{};
     payload->rect = selectionRect;
     payload->releasePoint = releasePoint;
@@ -2216,7 +2222,42 @@ void AppController::HandleSelectionCanceled() {
         return;
     }
     Infrastructure::Logger::Get().Info(L"[Selection] canceled.");
+    if (IsOnMainUiThread()) {
+        ApplySelectionCanceledOnUiThread();
+        return;
+    }
     PostMessageW(mainWindow_, WM_APP + 103, 0, 0);
+}
+
+void AppController::ApplySelectionStartedOnUiThread() {
+    temporarySelection_.active = false;
+    pendingFenceCreation_.reset();
+    overlayWindow_.ClearSelectionRect();
+}
+
+void AppController::ApplySelectionUpdatedOnUiThread(const RECT& selectionRect) {
+    temporarySelection_.active = true;
+    temporarySelection_.rect = selectionRect;
+    overlayWindow_.SetSelectionRect(selectionRect);
+}
+
+void AppController::ApplySelectionCompletedOnUiThread(const RECT& selectionRect, const POINT& releasePoint) {
+    ConfirmSelectionRect(selectionRect, releasePoint);
+}
+
+void AppController::ApplySelectionCanceledOnUiThread() {
+    temporarySelection_.active = false;
+    pendingFenceCreation_.reset();
+    overlayWindow_.ClearSelectionRect();
+}
+
+bool AppController::IsOnMainUiThread() const {
+    if (mainWindow_ == nullptr || !IsWindow(mainWindow_)) {
+        return false;
+    }
+    DWORD processId = 0;
+    const DWORD windowThreadId = GetWindowThreadProcessId(mainWindow_, &processId);
+    return windowThreadId != 0 && windowThreadId == GetCurrentThreadId();
 }
 
 bool AppController::ShouldStartSelectionAt(const POINT& point) {

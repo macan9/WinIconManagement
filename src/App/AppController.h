@@ -104,6 +104,11 @@ private:
     void HandleSelectionUpdated(const RECT& selectionRect);
     void HandleSelectionCompleted(const RECT& selectionRect, const POINT& releasePoint);
     void HandleSelectionCanceled();
+    void ApplySelectionStartedOnUiThread();
+    void ApplySelectionUpdatedOnUiThread(const RECT& selectionRect);
+    void ApplySelectionCompletedOnUiThread(const RECT& selectionRect, const POINT& releasePoint);
+    void ApplySelectionCanceledOnUiThread();
+    [[nodiscard]] bool IsOnMainUiThread() const;
     [[nodiscard]] bool ShouldStartSelectionAt(const POINT& point);
     bool HandleSelectionConfirmMouseFilter(WPARAM message, const POINT& point);
     bool HandleFenceEditMouse(WPARAM message, const POINT& point);

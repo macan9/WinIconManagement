@@ -74,9 +74,13 @@ private:
     [[nodiscard]] bool CreateOverlayWindow();
     void ApplyRoundedRegion();
     void ApplyClickThroughStyle();
+    void ApplyLayeredAttributes();
     void NormalizeFenceRects();
     void NormalizeFenceRect();
     void EnsureDesktopLayerZOrder() const;
+    [[nodiscard]] RECT SelectionRectToLocalRect(const RECT& screenRect) const;
+    [[nodiscard]] RECT ExpandRectForSelectionStroke(const RECT& rect) const;
+    void InvalidateSelectionRectDelta(const RECT* previousSelectionRect);
     void Paint(HWND hwnd);
     void NormalizeSelectionRect();
     [[nodiscard]] RECT BuildConfirmRect() const;
@@ -118,6 +122,7 @@ private:
     bool fixedMode_;
     bool visible_;
     bool paintLogged_;
+    BYTE currentLayeredAlpha_;
     InteractionHitTarget hoverHitTarget_;
     ActiveFenceDragMode activeFenceDragMode_;
     POINT activeFenceDragStartPoint_;
