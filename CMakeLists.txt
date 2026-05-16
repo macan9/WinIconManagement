@@ -14,6 +14,7 @@ add_executable(WinIconManagement WIN32
     src/Background/BackgroundWindow.cpp
     src/Desktop/DesktopIconService.cpp
     src/Desktop/DesktopWindowResolver.cpp
+    src/ExplorerBridge/ExplorerBridgeManager.cpp
     src/Overlay/OverlayWindow.cpp
     src/Interaction/MouseController.cpp
     src/Tray/TrayIcon.cpp
@@ -54,4 +55,27 @@ target_link_libraries(WinIconManagement PRIVATE
     shell32
     shlwapi
     winsqlite3
+)
+
+add_library(ExplorerBridge SHARED
+    src/ExplorerBridge/BridgeDll.cpp
+)
+
+target_compile_definitions(ExplorerBridge PRIVATE
+    UNICODE
+    _UNICODE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+if(MSVC)
+    target_compile_options(ExplorerBridge PRIVATE /W4 /permissive- /utf-8)
+else()
+    target_compile_options(ExplorerBridge PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+set_target_properties(ExplorerBridge PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )

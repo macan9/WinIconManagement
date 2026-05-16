@@ -580,6 +580,7 @@ AppController::AppController(HINSTANCE instance)
       snapshotRepository_(&database_),
       restoreSession_{},
       backgroundWindow_(),
+      explorerBridgeManager_(),
       persistenceReady_(false),
       trayCallbackMessage_(kTrayCallbackMessage),
       taskbarCreatedMessage_(RegisterWindowMessageW(L"TaskbarCreated")),
@@ -643,9 +644,8 @@ bool AppController::Initialize() {
     if (!InitializeTray()) {
         return false;
     }
-    if (!backgroundWindow_.Initialize(instance_, nullptr)) {
-        Infrastructure::Logger::Get().Error(L"[Background] initialization failed.");
-    }
+    Infrastructure::Logger::Get().Info(
+        L"[Background] external BackgroundWindow is disabled as a primary path; ExplorerBridge owns real background.");
     // Overlay runs as an independent top-level window and should not be owned by main window.
     if (!overlayWindow_.Initialize(instance_, nullptr)) {
         Infrastructure::Logger::Get().Error(L"[Overlay] initialization failed.");
@@ -1548,49 +1548,34 @@ void AppController::UpdateOverlayWindow() {
 }
 
 bool AppController::UpdateBackgroundWindow() {
-    const DisplayDiagnostics display = CollectDisplayDiagnostics();
-
-    std::vector<RECT> backgroundFenceRects;
-    backgroundFenceRects.reserve(managedFences_.size());
-    for (const ManagedFenceState& managedFence : managedFences_) {
-        backgroundFenceRects.push_back(managedFence.record.bounds);
-    }
-
-    std::wstring selectedBackgroundHostStrategy = L"none";
-    if (desktopResolveResult_.backgroundAnchorWindow != nullptr &&
-               IsWindow(desktopResolveResult_.backgroundAnchorWindow)) {
-        backgroundWindow_.SetDesktopHostWindow(
-            desktopResolveResult_.backgroundAnchorWindow,
-            Background::DesktopHostLayer::BehindExplorerIcons);
-        selectedBackgroundHostStrategy = desktopResolveResult_.backgroundAnchorStrategy;
-    } else {
-        backgroundWindow_.SetDesktopHostWindow(nullptr, Background::DesktopHostLayer::Fallback);
-        selectedBackgroundHostStrategy = L"NoSafeBackgroundHost";
-    }
-
-    backgroundWindow_.SetVirtualDesktopRect(display.virtualDesktopRect);
-    backgroundWindow_.SetFenceRects(backgroundFenceRects);
-
     Infrastructure::Logger::Get().Info(
-        L"[Background] UpdateBackgroundWindow fenceCount=" + std::to_wstring(backgroundFenceRects.size()) +
-        L"; resolverAnchorStrategy=" + desktopResolveResult_.backgroundAnchorStrategy +
-        L"; selectedHostStrategy=" + selectedBackgroundHostStrategy);
-    if (backgroundFenceRects.empty()) {
-        backgroundWindow_.Hide();
-        Infrastructure::Logger::Get().Info(L"[Background] no managed fences: hide background window.");
+        L"[Background] external BackgroundWindow skipped; real background path is ExplorerBridge.");
+    backgroundWindow_.Destroy();
+    return UpdateExplorerBridge();
+}
+
+bool AppController::UpdateExplorerBridge() {
+    if (!isDesktopConnected_ || desktopResolveResult_.explorerProcessId == 0) {
+        Infrastructure::Logger::Get().Error(L"[ExplorerBridge] update skipped: desktop is not connected.");
         return false;
     }
 
-    backgroundWindow_.Show();
-    if (!backgroundWindow_.IsVisible()) {
-        Infrastructure::Logger::Get().Error(
-            L"[Background] primary path unavailable: no safe visible BackgroundWindow host.");
-        return false;
+    const bool injected = explorerBridgeManager_.Inject(desktopResolveResult_.explorerProcessId);
+    bool fenceRectsUpdated = false;
+    if (injected) {
+        std::vector<RECT> fenceRects;
+        fenceRects.reserve(managedFences_.size());
+        for (const ManagedFenceState& managedFence : managedFences_) {
+            fenceRects.push_back(managedFence.record.bounds);
+        }
+        fenceRectsUpdated = explorerBridgeManager_.UpdateFenceRects(fenceRects);
     }
-
     Infrastructure::Logger::Get().Info(
-        L"[Background] primary path active: using BackgroundWindow as real desktop background layer.");
-    return true;
+        L"[ExplorerBridge] update result=" + std::wstring(injected ? L"true" : L"false") +
+        L"; fenceRectsUpdated=" + std::wstring(fenceRectsUpdated ? L"true" : L"false") +
+        L"; explorerPid=" + std::to_wstring(desktopResolveResult_.explorerProcessId) +
+        L"; listView=" + HandleToString(desktopResolveResult_.listViewWindow));
+    return injected;
 }
 
 void AppController::CleanupWindowResources(HWND windowHandle) {
@@ -1605,6 +1590,7 @@ void AppController::CleanupWindowResources(HWND windowHandle) {
     if (windowHandle != nullptr && IsWindow(windowHandle)) {
         KillTimer(windowHandle, desktopHealthTimerId_);
     }
+    explorerBridgeManager_.Shutdown();
     backgroundWindow_.Destroy();
     overlayWindow_.Destroy();
     trayIcon_.Remove();
@@ -1638,7 +1624,6 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
         trayIcon_.SetPaused(isPaused_);
         trayIcon_.RecreateAfterExplorerRestart();
         UpdateBackgroundWindow();
-        backgroundWindow_.Show();
         UpdateOverlayWindow();
         overlayWindow_.Show();
         ResolveDesktopWindows(false);
@@ -1771,9 +1756,6 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
         case IDM_TRAY_SETTINGS:
             Infrastructure::Logger::Get().Info(L"Tray command: Settings.");
             ShowMainWindow();
-            if (backgroundWindow_.IsInitialized()) {
-                backgroundWindow_.Show();
-            }
             if (overlayWindow_.IsInitialized()) {
                 overlayWindow_.Show();
             }

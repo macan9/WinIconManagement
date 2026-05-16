@@ -10,6 +10,7 @@
 #include "Background/BackgroundWindow.h"
 #include "Desktop/DesktopIconService.h"
 #include "Desktop/DesktopWindowResolver.h"
+#include "ExplorerBridge/ExplorerBridgeManager.h"
 #include "Interaction/MouseController.h"
 #include "Persistence/Database.h"
 #include "Persistence/FenceRepository.h"
@@ -143,6 +144,7 @@ private:
     bool RestoreOriginalDesktopLayout(bool keepManagedFencesForNextLaunch);
     void UpdateWindowTitle();
     bool UpdateBackgroundWindow();
+    bool UpdateExplorerBridge();
     void CleanupWindowResources(HWND windowHandle);
     void UpdateOverlayWindow();
     void UpdateDpiMetrics(UINT dpi);
@@ -174,6 +176,7 @@ private:
     Persistence::SnapshotRepository snapshotRepository_;
     Persistence::RestoreSessionRecord restoreSession_;
     Background::BackgroundWindow backgroundWindow_;
+    ExplorerBridge::ExplorerBridgeManager explorerBridgeManager_;
     Overlay::OverlayWindow overlayWindow_;
     Interaction::MouseController mouseController_;
     bool persistenceReady_;
