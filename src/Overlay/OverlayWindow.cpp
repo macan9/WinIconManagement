@@ -17,6 +17,7 @@ constexpr COLORREF kFenceBorderColor = RGB(36, 99, 235);
 constexpr COLORREF kFenceActiveFillColor = RGB(34, 197, 94);
 constexpr COLORREF kFenceActiveBorderColor = RGB(21, 128, 61);
 constexpr BYTE kFenceFillAlpha = 70;
+constexpr BYTE kFenceEditFillAlpha = 28;
 constexpr int kFenceBorderWidth = 2;
 constexpr int kFenceActiveBorderWidth = 3;
 constexpr COLORREF kSelectionFillColor = RGB(59, 130, 246);
@@ -628,9 +629,8 @@ void OverlayWindow::Paint(HWND hwnd) {
             const COLORREF borderColor = isActiveFence ? kFenceActiveBorderColor : kFenceBorderColor;
             const int borderWidth = isActiveFence ? kFenceActiveBorderWidth : kFenceBorderWidth;
 
-            HBRUSH fillBrush = CreateSolidBrush(fillColor);
             HPEN borderPen = CreatePen(PS_SOLID, borderWidth, borderColor);
-            HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
+            HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
             HGDIOBJ oldPen = SelectObject(hdc, borderPen);
 
             RoundRect(
@@ -645,7 +645,21 @@ void OverlayWindow::Paint(HWND hwnd) {
             SelectObject(hdc, oldPen);
             SelectObject(hdc, oldBrush);
             DeleteObject(borderPen);
-            DeleteObject(fillBrush);
+
+            // Only show a subtle title-band tint in edit mode so desktop icons remain visually unobstructed.
+            if (!fixedMode_) {
+                const int titleBandBottom = std::min(localFenceRect.bottom, localFenceRect.top + kActiveFenceMoveAreaHeight);
+                if (titleBandBottom > localFenceRect.top) {
+                    RECT titleBandRect{
+                        localFenceRect.left + borderWidth,
+                        localFenceRect.top + borderWidth,
+                        std::max(localFenceRect.left + borderWidth, localFenceRect.right - borderWidth),
+                        titleBandBottom};
+                    HBRUSH titleBandBrush = CreateSolidBrush(fillColor);
+                    FillRect(hdc, &titleBandRect, titleBandBrush);
+                    DeleteObject(titleBandBrush);
+                }
+            }
 
             RECT titleRect{
                 localFenceRect.left + 12,
@@ -697,7 +711,7 @@ void OverlayWindow::Paint(HWND hwnd) {
 
     EndPaint(hwnd, &paint);
 
-    BYTE alpha = static_cast<BYTE>(fixedMode_ ? kFenceFillAlpha : (kFenceFillAlpha + 20));
+    BYTE alpha = static_cast<BYTE>(fixedMode_ ? 255 : std::max<BYTE>(kSelectionOnlyAlpha, kFenceEditFillAlpha));
     if (hasSelectionRect_) {
         alpha = std::max(alpha, kSelectionOnlyAlpha);
     }

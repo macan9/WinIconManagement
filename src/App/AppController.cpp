@@ -2557,8 +2557,16 @@ bool AppController::RenameActiveFence(HWND ownerWindow) {
 #endif
 
 void AppController::ConfirmSelectionRect(const RECT& selectionRect, const POINT& anchorPoint) {
-    const int width = selectionRect.right - selectionRect.left;
-    const int height = selectionRect.bottom - selectionRect.top;
+    RECT normalizedRect = selectionRect;
+    if (normalizedRect.left > normalizedRect.right) {
+        std::swap(normalizedRect.left, normalizedRect.right);
+    }
+    if (normalizedRect.top > normalizedRect.bottom) {
+        std::swap(normalizedRect.top, normalizedRect.bottom);
+    }
+
+    const int width = normalizedRect.right - normalizedRect.left;
+    const int height = normalizedRect.bottom - normalizedRect.top;
     if (width < kSelectionMinWidth || height < kSelectionMinHeight) {
         desktopIconReadStatus_ = L"Selection canceled: area too small.";
         temporarySelection_.active = false;
@@ -2570,9 +2578,9 @@ void AppController::ConfirmSelectionRect(const RECT& selectionRect, const POINT&
 
     temporarySelection_.active = false;
     pendingFenceCreation_ = PendingFenceCreationState{
-        selectionRect,
+        normalizedRect,
         anchorPoint};
-    overlayWindow_.ShowSelectionConfirm(selectionRect, anchorPoint);
+    overlayWindow_.ShowSelectionConfirm(normalizedRect, anchorPoint);
 }
 
 void AppController::HandleSelectionConfirmDecision(bool confirmed) {
@@ -2601,61 +2609,126 @@ void AppController::ApplyFenceFromSelectionRect(const RECT& selectionRect) {
     overlayWindow_.ClearSelectionRect();
     temporarySelection_.active = false;
 
+    if (!persistenceReady_) {
+        desktopIconReadStatus_ = L"Selection failed: fence persistence unavailable.";
+        UpdateDiagnosticsTextControl();
+        return;
+    }
+
+    if (!managedFences_.empty()) {
+        desktopIconReadStatus_ = L"Selection blocked: plan 10 only supports creating the first Fence.";
+        UpdateDiagnosticsTextControl();
+        return;
+    }
+
     if (!EnsureDesktopConnection()) {
         desktopIconReadStatus_ = L"Selection failed: desktop connection unavailable.";
         UpdateDiagnosticsTextControl();
         return;
     }
 
-    RefreshDesktopIconSnapshot();
-    const RECT fenceRect = BuildFenceRectFromSelection(selectionRect);
-    const std::vector<Desktop::DesktopIcon> selectedIcons = CollectIconsInRect(selectionRect);
-    const std::vector<Desktop::DesktopIcon> movedIcons =
-        BuildIconsForFenceLayout(selectedIcons, fenceRect);
-    long long createdFenceId = 0;
-
-    int movedCount = 0;
-    if (!movedIcons.empty()) {
-        movedCount = desktopIconService_.MoveDesktopIcons(
-            desktopResolveResult_.listViewWindow,
-            desktopResolveResult_.explorerProcessId,
-            movedIcons);
+    RECT normalizedSelection = selectionRect;
+    if (normalizedSelection.left > normalizedSelection.right) {
+        std::swap(normalizedSelection.left, normalizedSelection.right);
+    }
+    if (normalizedSelection.top > normalizedSelection.bottom) {
+        std::swap(normalizedSelection.top, normalizedSelection.bottom);
     }
 
-    overlayWindow_.SetFenceRect(fenceRect);
-    if (!selectedIcons.empty() && !movedIcons.empty()) {
-        createdFenceId = SaveFenceSelection(fenceRect, selectedIcons, movedIcons);
-    } else if (persistenceReady_) {
-        // Keep empty rectangle as a valid fence even when no icons were hit.
-        Persistence::FenceRecord fence{};
-        fence.name = L"Desktop Group";
-        fence.bounds = fenceRect;
-        fence.styleJson = L"{\"source\":\"drag-selection\",\"empty\":true}";
-        createdFenceId = fenceRepository_.CreateFence(fence);
-        if (createdFenceId > 0) {
-            (void)fenceRepository_.ReplaceFenceIcons(createdFenceId, {});
+    RefreshDesktopIconSnapshot();
+    const std::vector<Desktop::DesktopIcon> selectedIcons = CollectIconsInRect(normalizedSelection);
+    if (selectedIcons.empty()) {
+        desktopIconReadStatus_ = L"Selection canceled: no desktop icons in region.";
+        UpdateDiagnosticsTextControl();
+        return;
+    }
+
+    const RECT fenceRect = BuildFenceRectFromSelection(normalizedSelection);
+    const std::vector<Desktop::DesktopIcon> movedIcons =
+        BuildIconsForFenceLayout(selectedIcons, fenceRect);
+    if (movedIcons.empty()) {
+        desktopIconReadStatus_ = L"Selection failed: unable to compute Fence layout targets.";
+        UpdateDiagnosticsTextControl();
+        return;
+    }
+
+    if (movedIcons.size() != selectedIcons.size()) {
+        desktopIconReadStatus_ =
+            L"Selection canceled: selected " + std::to_wstring(selectedIcons.size()) +
+            L" icons but Fence capacity is " + std::to_wstring(movedIcons.size()) + L".";
+        UpdateDiagnosticsTextControl();
+        return;
+    }
+
+    std::unordered_map<int, Desktop::DesktopIcon> originalIconsByIndex;
+    originalIconsByIndex.reserve(selectedIcons.size());
+    for (const Desktop::DesktopIcon& icon : selectedIcons) {
+        originalIconsByIndex.emplace(icon.index, icon);
+    }
+
+    auto revertMovedIcons = [this, &originalIconsByIndex](const std::vector<Desktop::DesktopIcon>& movedTargets) {
+        int revertedCount = 0;
+        for (const Desktop::DesktopIcon& movedTarget : movedTargets) {
+            const auto found = originalIconsByIndex.find(movedTarget.index);
+            if (found == originalIconsByIndex.end()) {
+                continue;
+            }
+            if (desktopIconService_.SetDesktopIconPosition(
+                    desktopResolveResult_.listViewWindow,
+                    desktopResolveResult_.explorerProcessId,
+                    movedTarget.index,
+                    found->second.position)) {
+                ++revertedCount;
+            }
         }
+        return revertedCount;
+    };
+
+    std::vector<Desktop::DesktopIcon> successfullyMovedIcons;
+    successfullyMovedIcons.reserve(movedIcons.size());
+    for (const Desktop::DesktopIcon& movedIcon : movedIcons) {
+        if (desktopIconService_.SetDesktopIconPosition(
+                desktopResolveResult_.listViewWindow,
+                desktopResolveResult_.explorerProcessId,
+                movedIcon.index,
+                movedIcon.position)) {
+            successfullyMovedIcons.push_back(movedIcon);
+        }
+    }
+
+    if (successfullyMovedIcons.size() != movedIcons.size()) {
+        const int revertedCount = revertMovedIcons(successfullyMovedIcons);
+        RefreshDesktopIconSnapshot();
+        desktopIconReadStatus_ =
+            L"Selection failed: moved " + std::to_wstring(successfullyMovedIcons.size()) +
+            L"/" + std::to_wstring(movedIcons.size()) +
+            L" icons, then reverted " + std::to_wstring(revertedCount) + L".";
+        UpdateDiagnosticsTextControl();
+        return;
+    }
+
+    const long long createdFenceId = SaveFenceSelection(fenceRect, selectedIcons, movedIcons);
+    if (createdFenceId <= 0) {
+        const int revertedCount = revertMovedIcons(successfullyMovedIcons);
+        RefreshDesktopIconSnapshot();
+        desktopIconReadStatus_ =
+            L"Selection failed: fence persistence failed, reverted " +
+            std::to_wstring(revertedCount) + L"/" + std::to_wstring(successfullyMovedIcons.size()) + L" icons.";
+        UpdateDiagnosticsTextControl();
+        return;
     }
 
     ReloadManagedFences();
     shouldRestoreManagedFences_ = !managedFences_.empty();
     PersistRuntimeRestoreSession(L"create_fence");
-    if (createdFenceId > 0) {
-        SetActiveFence(createdFenceId);
-    } else {
-        UpdateOverlayWindow();
-        UpdateDiagnosticsTextControl();
-    }
+    UpdateOverlayWindow();
+    overlayWindow_.Show();
+    SetActiveFence(createdFenceId);
     RefreshDesktopIconSnapshot();
-    if (selectedIcons.empty()) {
-        desktopIconReadStatus_ = L"Selection applied: rectangle saved (no icons in region).";
-    } else if (movedCount > 0) {
-        desktopIconReadStatus_ =
-            L"Selection grouped icons: " + std::to_wstring(movedCount) +
-            L"/" + std::to_wstring(movedIcons.size());
-    } else {
-        desktopIconReadStatus_ = L"Selection applied: rectangle saved, icon move skipped.";
-    }
+    desktopIconReadStatus_ =
+        L"Selection grouped icons: " + std::to_wstring(movedIcons.size()) +
+        L"/" + std::to_wstring(selectedIcons.size()) +
+        L"; created first Fence #" + std::to_wstring(createdFenceId) + L".";
     UpdateDiagnosticsTextControl();
 }
 
@@ -2665,9 +2738,17 @@ std::vector<Desktop::DesktopIcon> AppController::CollectIconsInRect(const RECT& 
         return selected;
     }
 
+    RECT normalizedRect = selectionRect;
+    if (normalizedRect.left > normalizedRect.right) {
+        std::swap(normalizedRect.left, normalizedRect.right);
+    }
+    if (normalizedRect.top > normalizedRect.bottom) {
+        std::swap(normalizedRect.top, normalizedRect.bottom);
+    }
+
     for (const Desktop::DesktopIcon& icon : desktopIcons_) {
-        if (icon.position.x >= selectionRect.left && icon.position.x <= selectionRect.right &&
-            icon.position.y >= selectionRect.top && icon.position.y <= selectionRect.bottom) {
+        if (icon.position.x >= normalizedRect.left && icon.position.x <= normalizedRect.right &&
+            icon.position.y >= normalizedRect.top && icon.position.y <= normalizedRect.bottom) {
             selected.push_back(icon);
         }
     }
