@@ -75,6 +75,10 @@ private:
     void ApplyRoundedRegion();
     void ApplyClickThroughStyle();
     void ApplyLayeredAttributes();
+    void RefreshPresentation();
+    [[nodiscard]] bool RefreshFixedLayeredWindow();
+    void RenderFenceRects(HDC hdc) const;
+    void RenderFenceRectsToLayeredBitmap(void* bits, int width, int height) const;
     void NormalizeFenceRects();
     void NormalizeFenceRect();
     void EnsureDesktopLayerZOrder() const;
@@ -123,6 +127,7 @@ private:
     bool visible_;
     bool paintLogged_;
     BYTE currentLayeredAlpha_;
+    bool usingPerPixelLayeredMode_;
     InteractionHitTarget hoverHitTarget_;
     ActiveFenceDragMode activeFenceDragMode_;
     POINT activeFenceDragStartPoint_;

@@ -26,6 +26,8 @@ struct DesktopResolveResult {
     std::wstring overlayAnchorStrategy;
     std::wstring shellDefViewClassName;
     std::wstring listViewClassName;
+    std::wstring backgroundAnchorParentClassName;
+    std::wstring overlayAnchorParentClassName;
     std::wstring failureStep;
     DWORD failureCode = 0;
 };

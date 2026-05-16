@@ -1,6 +1,8 @@
 #include "Background/BackgroundWindow.h"
 
+#include <array>
 #include <algorithm>
+#include <sstream>
 #include <string>
 
 #include "Infrastructure/Logger.h"
@@ -8,25 +10,13 @@
 namespace {
 constexpr wchar_t kBackgroundWindowClassName[] = L"WinIconManagement.BackgroundWindow";
 constexpr int kFenceCornerRadiusPixels = 10;
-constexpr COLORREF kFenceFillColor = RGB(214, 228, 255);
-constexpr COLORREF kFenceBorderColor = RGB(120, 157, 235);
-constexpr int kFenceBorderWidth = 2;
+constexpr COLORREF kFenceFillColor = RGB(202, 231, 214);
+constexpr COLORREF kFenceBorderColor = RGB(62, 132, 95);
+constexpr int kFenceBorderWidth = 1;
 
-RECT FenceRectToLocalRect(const RECT& screenRect, const RECT& virtualDesktopRect) {
-    return RECT{
-        screenRect.left - virtualDesktopRect.left,
-        screenRect.top - virtualDesktopRect.top,
-        screenRect.right - virtualDesktopRect.left,
-        screenRect.bottom - virtualDesktopRect.top};
-}
-
-RECT ClampRectToClient(const RECT& rect, const RECT& clientRect) {
-    RECT clamped = rect;
-    clamped.left = std::max(clamped.left, clientRect.left);
-    clamped.top = std::max(clamped.top, clientRect.top);
-    clamped.right = std::min(clamped.right, clientRect.right);
-    clamped.bottom = std::min(clamped.bottom, clientRect.bottom);
-    return clamped;
+std::wstring RectToString(const RECT& rect) {
+    return L"[" + std::to_wstring(rect.left) + L"," + std::to_wstring(rect.top) +
+           L"]-[" + std::to_wstring(rect.right) + L"," + std::to_wstring(rect.bottom) + L"]";
 }
 
 RECT ScreenRectToHostClientRect(const RECT& screenRect, HWND hostWindow) {
@@ -44,29 +34,46 @@ RECT ScreenRectToHostClientRect(const RECT& screenRect, HWND hostWindow) {
         bottomRight.y};
 }
 
-void ForceImmediateRedraw(HWND window) {
-    if (window == nullptr || !IsWindow(window)) {
-        return;
-    }
-
-    RedrawWindow(
-        window,
-        nullptr,
-        nullptr,
-        RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+bool RectEquals(const RECT& left, const RECT& right) {
+    return left.left == right.left &&
+           left.top == right.top &&
+           left.right == right.right &&
+           left.bottom == right.bottom;
 }
 
-void ForceHostAndChildRedraw(HWND hostWindow, HWND childWindow) {
-    ForceImmediateRedraw(childWindow);
-    if (hostWindow == nullptr || !IsWindow(hostWindow)) {
-        return;
+std::wstring HandleToString(HWND handle) {
+    if (handle == nullptr) {
+        return L"0x0";
     }
 
-    RedrawWindow(
-        hostWindow,
-        nullptr,
-        nullptr,
-        RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    std::wstringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << reinterpret_cast<uintptr_t>(handle);
+    return stream.str();
+}
+
+std::wstring GetWindowClassName(HWND window) {
+    if (window == nullptr || !IsWindow(window)) {
+        return L"<null>";
+    }
+
+    std::array<wchar_t, 256> buffer{};
+    const int length = GetClassNameW(window, buffer.data(), static_cast<int>(buffer.size()));
+    if (length <= 0) {
+        return L"<unknown>";
+    }
+    return std::wstring(buffer.data(), static_cast<size_t>(length));
+}
+
+std::wstring DesktopHostLayerToString(Background::DesktopHostLayer layer) {
+    switch (layer) {
+        case Background::DesktopHostLayer::BehindExplorerIcons:
+            return L"BehindExplorerIcons";
+        case Background::DesktopHostLayer::ShellDefViewBehindListView:
+            return L"ShellDefViewBehindListView";
+        case Background::DesktopHostLayer::Fallback:
+        default:
+            return L"Fallback";
+    }
 }
 }
 
@@ -74,13 +81,13 @@ namespace Background {
 BackgroundWindow::BackgroundWindow()
     : instance_(nullptr),
       ownerWindow_(nullptr),
-      window_(nullptr),
       desktopHostWindow_(nullptr),
+      desktopHostLayer_(DesktopHostLayer::Fallback),
       virtualDesktopRect_{0, 0, 0, 0},
       fenceRects_(),
+      fenceWindows_(),
       visible_(false),
-      shouldBeVisible_(false),
-      paintLogged_(false) {}
+      shouldBeVisible_(false) {}
 
 BackgroundWindow::~BackgroundWindow() {
     Destroy();
@@ -97,122 +104,114 @@ bool BackgroundWindow::Initialize(HINSTANCE instance, HWND ownerWindow) {
         return false;
     }
 
-    Infrastructure::Logger::Get().Info(L"[Background] Initialize success (window creation deferred until host is ready).");
+    Infrastructure::Logger::Get().Info(
+        L"[Background] Initialize success (per-fence child windows; creation deferred until host is ready).");
     return true;
 }
 
 void BackgroundWindow::Destroy() {
-    DestroyWindowHandle();
+    DestroyFenceWindows();
     visible_ = false;
     shouldBeVisible_ = false;
-    paintLogged_ = false;
     desktopHostWindow_ = nullptr;
 }
 
 bool BackgroundWindow::IsInitialized() const {
-    return window_ != nullptr && IsWindow(window_);
+    return instance_ != nullptr;
+}
+
+bool BackgroundWindow::IsVisible() const {
+    return visible_;
 }
 
 HWND BackgroundWindow::Handle() const {
-    return window_;
+    if (fenceWindows_.empty()) {
+        return nullptr;
+    }
+    return fenceWindows_.front().window;
 }
 
 void BackgroundWindow::Show() {
     shouldBeVisible_ = true;
-    if (!EnsureWindowCreated()) {
-        return;
+    EnsureHostWindowReady();
+    if (fenceWindows_.size() != fenceRects_.size()) {
+        RebuildFenceWindows();
+    } else {
+        UpdateFenceWindowBounds();
     }
-
-    EnsureDesktopLayerZOrder();
-    SetWindowPos(
-        window_,
-        HWND_BOTTOM,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
-    ShowWindow(window_, SW_SHOWNOACTIVATE);
-    ForceHostAndChildRedraw(desktopHostWindow_, window_);
-    PaintNow();
-    visible_ = true;
-    Infrastructure::Logger::Get().Info(L"[Background] Show.");
+    ShowFenceWindows();
+    visible_ = !fenceWindows_.empty();
+    Infrastructure::Logger::Get().Info(
+        L"[Background] Show. windowCount=" + std::to_wstring(fenceWindows_.size()));
 }
 
 void BackgroundWindow::Hide() {
     shouldBeVisible_ = false;
-    if (!IsInitialized()) {
-        return;
-    }
-
-    ShowWindow(window_, SW_HIDE);
+    HideFenceWindows();
     visible_ = false;
     Infrastructure::Logger::Get().Info(L"[Background] Hide.");
 }
 
 void BackgroundWindow::SetVirtualDesktopRect(const RECT& virtualDesktopRect) {
     virtualDesktopRect_ = virtualDesktopRect;
-    if (!EnsureWindowCreated()) {
-        return;
-    }
-
-    UpdateWindowBounds();
-    ApplyFenceRegion();
-    EnsureDesktopLayerZOrder();
-    InvalidateRect(window_, nullptr, FALSE);
-    ForceHostAndChildRedraw(desktopHostWindow_, window_);
-    PaintNow();
+    UpdateFenceWindowBounds();
 }
 
-void BackgroundWindow::SetDesktopHostWindow(HWND desktopHostWindow) {
-    if (desktopHostWindow_ == desktopHostWindow) {
-        if (shouldBeVisible_ && EnsureWindowCreated()) {
-            ShowWindow(window_, SW_SHOWNOACTIVATE);
-            ForceImmediateRedraw(window_);
-            visible_ = true;
+void BackgroundWindow::SetDesktopHostWindow(HWND desktopHostWindow, DesktopHostLayer desktopHostLayer) {
+    if (desktopHostWindow_ == desktopHostWindow && desktopHostLayer_ == desktopHostLayer) {
+        if (shouldBeVisible_) {
+            EnsureHostWindowReady();
+            ShowFenceWindows();
+            visible_ = !fenceWindows_.empty();
         }
         return;
     }
 
     desktopHostWindow_ = desktopHostWindow;
+    desktopHostLayer_ = desktopHostLayer;
     if (desktopHostWindow_ == nullptr || !IsWindow(desktopHostWindow_)) {
-        Infrastructure::Logger::Get().Info(L"[Background] Desktop host unavailable; skip reparent.");
-        DestroyWindowHandle();
+        Infrastructure::Logger::Get().Info(L"[Background] Desktop host unavailable; destroy fence windows.");
+        DestroyFenceWindows();
         visible_ = false;
         return;
     }
 
-    if (IsInitialized()) {
-        Infrastructure::Logger::Get().Info(
-            L"[Background] Desktop host changed; recreate child window. oldHost=0x" +
-            std::to_wstring(reinterpret_cast<uintptr_t>(GetParent(window_))) +
-            L"; newHost=0x" + std::to_wstring(reinterpret_cast<uintptr_t>(desktopHostWindow_)));
-        DestroyWindowHandle();
+    Infrastructure::Logger::Get().Info(
+        L"[Background] Desktop host changed. newHost=" + HandleToString(desktopHostWindow_) +
+        L"; layer=" + DesktopHostLayerToString(desktopHostLayer_) +
+        L"; class=" + GetWindowClassName(desktopHostWindow_));
+    LogHostDiagnostics(L"host_changed");
+    EnsureHostWindowReady();
+    if (!fenceRects_.empty()) {
+        RebuildFenceWindows();
     }
-
-    if (EnsureWindowCreated()) {
-        UpdateWindowBounds();
-        ApplyFenceRegion();
-        EnsureDesktopLayerZOrder();
-        if (shouldBeVisible_) {
-            ShowWindow(window_, SW_SHOWNOACTIVATE);
-            ForceHostAndChildRedraw(desktopHostWindow_, window_);
-            PaintNow();
-            visible_ = true;
-        }
+    if (shouldBeVisible_) {
+        ShowFenceWindows();
+        visible_ = !fenceWindows_.empty();
     }
 }
 
 void BackgroundWindow::SetFenceRects(const std::vector<RECT>& fenceRects) {
-    fenceRects_ = fenceRects;
-    if (!EnsureWindowCreated()) {
-        return;
+    bool changed = fenceRects_.size() != fenceRects.size();
+    if (!changed) {
+        for (size_t i = 0; i < fenceRects.size(); ++i) {
+            if (!RectEquals(fenceRects_[i], fenceRects[i])) {
+                changed = true;
+                break;
+            }
+        }
     }
 
-    ApplyFenceRegion();
-    InvalidateRect(window_, nullptr, FALSE);
-    ForceHostAndChildRedraw(desktopHostWindow_, window_);
-    PaintNow();
+    fenceRects_ = fenceRects;
+    if (changed || fenceWindows_.size() != fenceRects_.size()) {
+        RebuildFenceWindows();
+    } else {
+        UpdateFenceWindowBounds();
+    }
+    if (shouldBeVisible_) {
+        ShowFenceWindows();
+        visible_ = !fenceWindows_.empty();
+    }
 }
 
 LRESULT CALLBACK BackgroundWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -235,20 +234,13 @@ LRESULT BackgroundWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
     switch (message) {
         case WM_NCHITTEST:
             return HTTRANSPARENT;
-        case WM_SHOWWINDOW:
-            Infrastructure::Logger::Get().Info(
-                L"[Background] WM_SHOWWINDOW shown=" + std::to_wstring(wParam != FALSE ? 1 : 0));
-            return DefWindowProcW(hwnd, message, wParam, lParam);
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT:
-            Paint(hwnd);
+            PaintFenceWindow(hwnd);
             return 0;
         case WM_NCDESTROY:
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-            if (window_ == hwnd) {
-                window_ = nullptr;
-            }
             return 0;
         default:
             return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -258,7 +250,7 @@ LRESULT BackgroundWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
 bool BackgroundWindow::RegisterClass() const {
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
-    windowClass.style = 0;
+    windowClass.style = CS_HREDRAW | CS_VREDRAW;
     windowClass.lpfnWndProc = &BackgroundWindow::WindowProc;
     windowClass.hInstance = instance_;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -275,28 +267,21 @@ bool BackgroundWindow::RegisterClass() const {
     return true;
 }
 
-bool BackgroundWindow::CreateBackgroundWindow() {
+HWND BackgroundWindow::CreateFenceWindow(const RECT& fenceRect) {
     if (desktopHostWindow_ == nullptr || !IsWindow(desktopHostWindow_)) {
-        return false;
-    }
-    if (virtualDesktopRect_.left == virtualDesktopRect_.right ||
-        virtualDesktopRect_.top == virtualDesktopRect_.bottom) {
-        virtualDesktopRect_.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        virtualDesktopRect_.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        virtualDesktopRect_.right = virtualDesktopRect_.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        virtualDesktopRect_.bottom = virtualDesktopRect_.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        return nullptr;
     }
 
-    const RECT hostClientRect = ScreenRectToHostClientRect(virtualDesktopRect_, desktopHostWindow_);
-    const int width = std::max(1, static_cast<int>(hostClientRect.right - hostClientRect.left));
-    const int height = std::max(1, static_cast<int>(hostClientRect.bottom - hostClientRect.top));
-    window_ = CreateWindowExW(
+    const RECT hostRect = ScreenRectToHostClientRect(fenceRect, desktopHostWindow_);
+    const int width = std::max(1L, hostRect.right - hostRect.left);
+    const int height = std::max(1L, hostRect.bottom - hostRect.top);
+    HWND window = CreateWindowExW(
         0,
         kBackgroundWindowClassName,
-        L"WinIconManagement Background",
-        WS_CHILD | WS_CLIPSIBLINGS,
-        hostClientRect.left,
-        hostClientRect.top,
+        L"WinIconManagement Fence Background",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        hostRect.left,
+        hostRect.top,
         width,
         height,
         desktopHostWindow_,
@@ -304,226 +289,338 @@ bool BackgroundWindow::CreateBackgroundWindow() {
         instance_,
         this);
 
-    if (window_ == nullptr) {
+    if (window == nullptr) {
         Infrastructure::Logger::Get().Error(
-            L"[Background] CreateWindowExW failed. error=" + std::to_wstring(GetLastError()));
-        return false;
+            L"[Background] CreateWindowExW failed for fence rect=" + RectToString(fenceRect) +
+            L"; error=" + std::to_wstring(GetLastError()));
+        return nullptr;
     }
 
-    ApplyFenceRegion();
-    EnsureDesktopLayerZOrder();
-    if (shouldBeVisible_) {
-        ShowWindow(window_, SW_SHOWNOACTIVATE);
-        ForceHostAndChildRedraw(desktopHostWindow_, window_);
-        PaintNow();
-        visible_ = true;
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, kFenceCornerRadiusPixels * 2, kFenceCornerRadiusPixels * 2);
+    if (region != nullptr) {
+        SetWindowRgn(window, region, TRUE);
     }
-    Infrastructure::Logger::Get().Info(
-        L"[Background] CreateWindowExW success. hwnd=0x" +
-        std::to_wstring(reinterpret_cast<uintptr_t>(window_)) +
-        L"; width=" + std::to_wstring(width) +
-        L"; height=" + std::to_wstring(height) +
-        L"; host=0x" + std::to_wstring(reinterpret_cast<uintptr_t>(desktopHostWindow_)) +
-        L"; visible=" + std::wstring(shouldBeVisible_ ? L"true" : L"false"));
-    return true;
+
+    SetWindowPos(
+        window,
+        GetFenceWindowZOrderTarget(),
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_SHOWWINDOW);
+
+    LogFenceWindowDiagnostics(window, fenceRect);
+    return window;
 }
 
-bool BackgroundWindow::EnsureWindowCreated() {
-    if (IsInitialized()) {
-        return true;
+void BackgroundWindow::DestroyFenceWindows() {
+    for (const FenceVisualWindow& fenceWindow : fenceWindows_) {
+        if (fenceWindow.window != nullptr && IsWindow(fenceWindow.window)) {
+            DestroyWindow(fenceWindow.window);
+        }
     }
+    fenceWindows_.clear();
+}
 
+void BackgroundWindow::RebuildFenceWindows() {
+    DestroyFenceWindows();
     if (instance_ == nullptr || desktopHostWindow_ == nullptr || !IsWindow(desktopHostWindow_)) {
-        return false;
+        return;
     }
 
-    return CreateBackgroundWindow();
+    EnsureHostWindowReady();
+    if (!IsDesktopHostUsable()) {
+        Infrastructure::Logger::Get().Error(
+            L"[Background] Rebuild skipped: desktop host is not usable for a background child layer.");
+        return;
+    }
+    for (const RECT& fenceRect : fenceRects_) {
+        RECT normalized = fenceRect;
+        if (normalized.left > normalized.right) {
+            std::swap(normalized.left, normalized.right);
+        }
+        if (normalized.top > normalized.bottom) {
+            std::swap(normalized.top, normalized.bottom);
+        }
+        if ((normalized.right - normalized.left) <= 0 || (normalized.bottom - normalized.top) <= 0) {
+            continue;
+        }
+
+        HWND window = CreateFenceWindow(normalized);
+        if (window == nullptr) {
+            continue;
+        }
+
+        fenceWindows_.push_back(FenceVisualWindow{
+            window,
+            normalized});
+    }
+
+    EnsureDesktopLayerZOrder();
 }
 
-void BackgroundWindow::DestroyWindowHandle() {
-    if (window_ != nullptr && IsWindow(window_)) {
-        Infrastructure::Logger::Get().Info(L"[Background] Destroy window.");
-        DestroyWindow(window_);
+void BackgroundWindow::UpdateFenceWindowBounds() {
+    if (desktopHostWindow_ == nullptr || !IsWindow(desktopHostWindow_)) {
+        return;
     }
-    window_ = nullptr;
-    paintLogged_ = false;
+
+    for (FenceVisualWindow& fenceWindow : fenceWindows_) {
+        if (fenceWindow.window == nullptr || !IsWindow(fenceWindow.window)) {
+            continue;
+        }
+
+        const RECT hostRect = ScreenRectToHostClientRect(fenceWindow.screenRect, desktopHostWindow_);
+        const int width = std::max(1L, hostRect.right - hostRect.left);
+        const int height = std::max(1L, hostRect.bottom - hostRect.top);
+        SetWindowPos(
+            fenceWindow.window,
+            GetFenceWindowZOrderTarget(),
+            hostRect.left,
+            hostRect.top,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_SHOWWINDOW);
+        HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, kFenceCornerRadiusPixels * 2, kFenceCornerRadiusPixels * 2);
+        if (region != nullptr) {
+            SetWindowRgn(fenceWindow.window, region, TRUE);
+        }
+        InvalidateRect(fenceWindow.window, nullptr, TRUE);
+        UpdateWindow(fenceWindow.window);
+    }
+
+    EnsureDesktopLayerZOrder();
+}
+
+void BackgroundWindow::ShowFenceWindows() {
+    for (const FenceVisualWindow& fenceWindow : fenceWindows_) {
+        if (fenceWindow.window == nullptr || !IsWindow(fenceWindow.window)) {
+            continue;
+        }
+        ShowWindow(fenceWindow.window, SW_SHOWNOACTIVATE);
+        RedrawWindow(
+            fenceWindow.window,
+            nullptr,
+            nullptr,
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME);
+    }
+    EnsureDesktopLayerZOrder();
+}
+
+void BackgroundWindow::HideFenceWindows() {
+    for (const FenceVisualWindow& fenceWindow : fenceWindows_) {
+        if (fenceWindow.window == nullptr || !IsWindow(fenceWindow.window)) {
+            continue;
+        }
+        ShowWindow(fenceWindow.window, SW_HIDE);
+    }
 }
 
 void BackgroundWindow::EnsureDesktopLayerZOrder() const {
-    if (!IsInitialized()) {
-        return;
-    }
-
-    SetWindowPos(
-        window_,
-        HWND_BOTTOM,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
-}
-
-void BackgroundWindow::UpdateWindowBounds() {
-    if (!IsInitialized()) {
-        return;
-    }
-
-    const RECT hostClientRect = ScreenRectToHostClientRect(virtualDesktopRect_, desktopHostWindow_);
-    SetWindowPos(
-        window_,
-        HWND_BOTTOM,
-        hostClientRect.left,
-        hostClientRect.top,
-        std::max(1L, hostClientRect.right - hostClientRect.left),
-        std::max(1L, hostClientRect.bottom - hostClientRect.top),
-        SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING |
-            SWP_FRAMECHANGED |
-            (shouldBeVisible_ ? SWP_SHOWWINDOW : 0));
-}
-
-void BackgroundWindow::ApplyFenceRegion() {
-    if (!IsInitialized()) {
-        return;
-    }
-
-    HRGN combinedRegion = CreateRectRgn(0, 0, 0, 0);
-    if (combinedRegion == nullptr) {
-        return;
-    }
-
-    for (const RECT& fenceRect : fenceRects_) {
-        RECT localRect = FenceRectToLocalRect(fenceRect, virtualDesktopRect_);
-        if (IsRectEmpty(&localRect)) {
+    for (const FenceVisualWindow& fenceWindow : fenceWindows_) {
+        if (fenceWindow.window == nullptr || !IsWindow(fenceWindow.window)) {
             continue;
         }
-
-        HRGN fenceRegion = CreateRoundRectRgn(
-            localRect.left,
-            localRect.top,
-            localRect.right + 1,
-            localRect.bottom + 1,
-            kFenceCornerRadiusPixels * 2,
-            kFenceCornerRadiusPixels * 2);
-        if (fenceRegion == nullptr) {
-            continue;
-        }
-
-        CombineRgn(combinedRegion, combinedRegion, fenceRegion, RGN_OR);
-        DeleteObject(fenceRegion);
+        SetWindowPos(
+            fenceWindow.window,
+            GetFenceWindowZOrderTarget(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
     }
-
-    SetWindowRgn(window_, combinedRegion, TRUE);
-    SetWindowPos(
-        window_,
-        nullptr,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_FRAMECHANGED);
 }
 
-void BackgroundWindow::PaintNow() {
-    if (!IsInitialized()) {
-        Infrastructure::Logger::Get().Info(L"[Background] PaintNow skipped: window not initialized.");
-        return;
-    }
-    if (!shouldBeVisible_) {
-        Infrastructure::Logger::Get().Info(L"[Background] PaintNow skipped: shouldBeVisible=false.");
+void BackgroundWindow::EnsureHostWindowReady() const {
+    if (desktopHostWindow_ == nullptr || !IsWindow(desktopHostWindow_)) {
         return;
     }
 
-    RECT clientRect{};
-    GetClientRect(window_, &clientRect);
-    if (IsRectEmpty(&clientRect)) {
-        Infrastructure::Logger::Get().Info(L"[Background] PaintNow skipped: empty client rect.");
-        return;
+    // Explorer owns this host. Do not ShowWindow/resize/reorder it, or a blank WorkerW can become a full-screen veil.
+    UpdateWindow(desktopHostWindow_);
+}
+
+bool BackgroundWindow::IsDesktopHostUsable() const {
+    if (desktopHostWindow_ == nullptr || !IsWindow(desktopHostWindow_)) {
+        return false;
+    }
+    const RECT targetRect = GetEffectiveVirtualDesktopRect();
+    const int targetWidth = targetRect.right - targetRect.left;
+    const int targetHeight = targetRect.bottom - targetRect.top;
+    if (targetWidth <= 0 || targetHeight <= 0) {
+        return false;
     }
 
-    HDC hdc = GetDC(window_);
-    if (hdc == nullptr) {
+    RECT hostWindowRect{};
+    RECT hostClientRect{};
+    GetWindowRect(desktopHostWindow_, &hostWindowRect);
+    GetClientRect(desktopHostWindow_, &hostClientRect);
+    const int hostWidth = hostWindowRect.right - hostWindowRect.left;
+    const int hostHeight = hostWindowRect.bottom - hostWindowRect.top;
+    const int clientWidth = hostClientRect.right - hostClientRect.left;
+    const int clientHeight = hostClientRect.bottom - hostClientRect.top;
+    const bool hostLooksLikeDesktop =
+        IsWindowVisible(desktopHostWindow_) != FALSE &&
+        hostWindowRect.left <= targetRect.left &&
+        hostWindowRect.top <= targetRect.top &&
+        hostWidth >= targetWidth &&
+        hostHeight >= targetHeight &&
+        clientWidth > 0 &&
+        clientHeight > 0;
+
+    if (!hostLooksLikeDesktop) {
         Infrastructure::Logger::Get().Info(
-            L"[Background] PaintNow skipped: GetDC failed. visible=" +
-            std::wstring(IsWindowVisible(window_) ? L"true" : L"false") +
-            L"; hostVisible=" +
-            std::wstring(
-                (desktopHostWindow_ != nullptr && IsWindow(desktopHostWindow_) && IsWindowVisible(desktopHostWindow_))
-                    ? L"true"
-                    : L"false"));
-        return;
+            L"[Background] Host rejected. reason=not_desktop_sized_or_not_visible; layer=" +
+            DesktopHostLayerToString(desktopHostLayer_) +
+            L"; host=" + HandleToString(desktopHostWindow_) +
+            L"; visible=" + std::wstring(IsWindowVisible(desktopHostWindow_) ? L"true" : L"false") +
+            L"; windowRect=" + RectToString(hostWindowRect) +
+            L"; clientRect=" + RectToString(hostClientRect) +
+            L"; targetRect=" + RectToString(targetRect));
     }
-
-    RenderContent(hdc, clientRect, clientRect);
-    ReleaseDC(window_, hdc);
-    Infrastructure::Logger::Get().Info(
-        L"[Background] PaintNow clientRect=[" + std::to_wstring(clientRect.left) + L"," +
-        std::to_wstring(clientRect.top) + L"]-[" + std::to_wstring(clientRect.right) + L"," +
-        std::to_wstring(clientRect.bottom) + L"]; visible=" +
-        std::wstring(IsWindowVisible(window_) ? L"true" : L"false") +
-        L"; hostVisible=" +
-        std::wstring(
-            (desktopHostWindow_ != nullptr && IsWindow(desktopHostWindow_) && IsWindowVisible(desktopHostWindow_))
-                ? L"true"
-                : L"false"));
+    return hostLooksLikeDesktop;
 }
 
-void BackgroundWindow::RenderContent(HDC hdc, const RECT& clientRect, const RECT& paintRect) const {
-    HBRUSH fenceFillBrush = CreateSolidBrush(kFenceFillColor);
-    FillRect(hdc, &paintRect, fenceFillBrush);
-    DeleteObject(fenceFillBrush);
+RECT BackgroundWindow::GetEffectiveVirtualDesktopRect() const {
+    if (virtualDesktopRect_.right > virtualDesktopRect_.left &&
+        virtualDesktopRect_.bottom > virtualDesktopRect_.top) {
+        return virtualDesktopRect_;
+    }
 
-    if (fenceRects_.empty()) {
+    RECT virtualDesktopRect{};
+    virtualDesktopRect.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    virtualDesktopRect.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    virtualDesktopRect.right = virtualDesktopRect.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    virtualDesktopRect.bottom = virtualDesktopRect.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    return virtualDesktopRect;
+}
+
+HWND BackgroundWindow::GetFenceWindowZOrderTarget() const {
+    if (desktopHostLayer_ == DesktopHostLayer::BehindExplorerIcons) {
+        return HWND_TOP;
+    }
+    return HWND_BOTTOM;
+}
+
+void BackgroundWindow::LogHostDiagnostics(const wchar_t* reason) const {
+    if (desktopHostWindow_ == nullptr || !IsWindow(desktopHostWindow_)) {
         return;
     }
 
-    HPEN fenceBorderPen = CreatePen(PS_SOLID, kFenceBorderWidth, kFenceBorderColor);
-    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
-    HGDIOBJ oldPen = SelectObject(hdc, fenceBorderPen);
+    RECT hostWindowRect{};
+    RECT hostClientRect{};
+    GetWindowRect(desktopHostWindow_, &hostWindowRect);
+    GetClientRect(desktopHostWindow_, &hostClientRect);
 
-    for (const RECT& fenceRect : fenceRects_) {
-        RECT localRect = FenceRectToLocalRect(fenceRect, virtualDesktopRect_);
-        localRect = ClampRectToClient(localRect, clientRect);
-        if (IsRectEmpty(&localRect)) {
-            continue;
+    std::wstring children;
+    HWND child = nullptr;
+    int childCount = 0;
+    while ((child = FindWindowExW(desktopHostWindow_, child, nullptr, nullptr)) != nullptr) {
+        ++childCount;
+        if (childCount <= 12) {
+            RECT childRect{};
+            GetWindowRect(child, &childRect);
+            children += L" {";
+            children += std::to_wstring(childCount);
+            children += L":";
+            children += HandleToString(child);
+            children += L",";
+            children += GetWindowClassName(child);
+            children += L",visible=";
+            children += IsWindowVisible(child) ? L"true" : L"false";
+            children += L",rect=";
+            children += RectToString(childRect);
+            children += L"}";
         }
-
-        RoundRect(
-            hdc,
-            localRect.left,
-            localRect.top,
-            localRect.right,
-            localRect.bottom,
-            kFenceCornerRadiusPixels * 2,
-            kFenceCornerRadiusPixels * 2);
     }
 
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(fenceBorderPen);
+    Infrastructure::Logger::Get().Info(
+        L"[Background] HostDiagnostics reason=" + std::wstring(reason != nullptr ? reason : L"<null>") +
+        L"; host=" + HandleToString(desktopHostWindow_) +
+        L"; class=" + GetWindowClassName(desktopHostWindow_) +
+        L"; layer=" + DesktopHostLayerToString(desktopHostLayer_) +
+        L"; hostVisible=" + std::wstring(IsWindowVisible(desktopHostWindow_) ? L"true" : L"false") +
+        L"; windowRect=" + RectToString(hostWindowRect) +
+        L"; clientRect=" + RectToString(hostClientRect) +
+        L"; childCount=" + std::to_wstring(childCount) +
+        L"; children=" + children);
 }
 
-void BackgroundWindow::Paint(HWND hwnd) {
+void BackgroundWindow::LogFenceWindowDiagnostics(HWND fenceWindow, const RECT& fenceRect) const {
+    if (fenceWindow == nullptr || !IsWindow(fenceWindow)) {
+        return;
+    }
+
+    RECT windowRect{};
+    RECT clientRect{};
+    GetWindowRect(fenceWindow, &windowRect);
+    GetClientRect(fenceWindow, &clientRect);
+    const HWND previousSibling = GetWindow(fenceWindow, GW_HWNDPREV);
+    const HWND nextSibling = GetWindow(fenceWindow, GW_HWNDNEXT);
+
+    Infrastructure::Logger::Get().Info(
+        L"[Background] Fence window created. hwnd=" + HandleToString(fenceWindow) +
+        L"; rect=" + RectToString(fenceRect) +
+        L"; host=" + HandleToString(desktopHostWindow_) +
+        L"; hostClass=" + GetWindowClassName(desktopHostWindow_) +
+        L"; layer=" + DesktopHostLayerToString(desktopHostLayer_) +
+        L"; zTarget=" + (GetFenceWindowZOrderTarget() == HWND_TOP ? std::wstring(L"HWND_TOP") : std::wstring(L"HWND_BOTTOM")) +
+        L"; previousSibling=" + HandleToString(previousSibling) +
+        L"; previousSiblingClass=" + GetWindowClassName(previousSibling) +
+        L"; nextSibling=" + HandleToString(nextSibling) +
+        L"; nextSiblingClass=" + GetWindowClassName(nextSibling) +
+        L"; windowRect=" + RectToString(windowRect) +
+        L"; clientRect=" + RectToString(clientRect) +
+        L"; visible=" + std::wstring(IsWindowVisible(fenceWindow) ? L"true" : L"false") +
+        L"; parentVisible=" + std::wstring(IsWindowVisible(desktopHostWindow_) ? L"true" : L"false"));
+}
+
+void BackgroundWindow::PaintFenceWindow(HWND hwnd) const {
+    const FenceVisualWindow* fenceWindow = FindFenceWindow(hwnd);
+    if (fenceWindow == nullptr) {
+        return;
+    }
+
     PAINTSTRUCT paint{};
     HDC hdc = BeginPaint(hwnd, &paint);
 
     RECT clientRect{};
     GetClientRect(hwnd, &clientRect);
-    RECT paintRect = paint.rcPaint;
-    if (IsRectEmpty(&paintRect)) {
-        paintRect = clientRect;
-    }
 
-    RenderContent(hdc, clientRect, paintRect);
+    HBRUSH fillBrush = CreateSolidBrush(kFenceFillColor);
+    FillRect(hdc, &clientRect, fillBrush);
+    DeleteObject(fillBrush);
+
+    HPEN borderPen = CreatePen(PS_SOLID, kFenceBorderWidth, kFenceBorderColor);
+    HGDIOBJ oldPen = SelectObject(hdc, borderPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    RoundRect(
+        hdc,
+        clientRect.left,
+        clientRect.top,
+        clientRect.right,
+        clientRect.bottom,
+        kFenceCornerRadiusPixels * 2,
+        kFenceCornerRadiusPixels * 2);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(borderPen);
 
     EndPaint(hwnd, &paint);
 
-    if (!paintLogged_) {
-        paintLogged_ = true;
-        Infrastructure::Logger::Get().Info(
-            L"[Background] WM_PAINT first frame. fenceCount=" + std::to_wstring(fenceRects_.size()) +
-            L"; paintRect=[" + std::to_wstring(paintRect.left) + L"," + std::to_wstring(paintRect.top) +
-            L"]-[" + std::to_wstring(paintRect.right) + L"," + std::to_wstring(paintRect.bottom) + L"]");
+    Infrastructure::Logger::Get().Info(
+        L"[Background] Fence window painted. hwnd=0x" +
+        std::to_wstring(reinterpret_cast<uintptr_t>(hwnd)) +
+        L"; clientRect=" + RectToString(clientRect));
+}
+
+const BackgroundWindow::FenceVisualWindow* BackgroundWindow::FindFenceWindow(HWND hwnd) const {
+    for (const FenceVisualWindow& fenceWindow : fenceWindows_) {
+        if (fenceWindow.window == hwnd) {
+            return &fenceWindow;
+        }
     }
+    return nullptr;
 }
 }  // namespace Background

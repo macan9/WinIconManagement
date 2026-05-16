@@ -1501,8 +1501,6 @@ bool AppController::HandleFenceEditMouse(WPARAM message, const POINT& point) {
 }
 
 void AppController::UpdateOverlayWindow() {
-    UpdateBackgroundWindow();
-
     if (!overlayWindow_.IsInitialized()) {
         return;
     }
@@ -1558,16 +1556,16 @@ bool AppController::UpdateBackgroundWindow() {
         backgroundFenceRects.push_back(managedFence.record.bounds);
     }
 
+    std::wstring selectedBackgroundHostStrategy = L"none";
     if (desktopResolveResult_.backgroundAnchorWindow != nullptr &&
-        IsWindow(desktopResolveResult_.backgroundAnchorWindow)) {
-        backgroundWindow_.SetDesktopHostWindow(desktopResolveResult_.backgroundAnchorWindow);
-    } else if (desktopResolveResult_.workerWindow != nullptr && IsWindow(desktopResolveResult_.workerWindow)) {
-        backgroundWindow_.SetDesktopHostWindow(desktopResolveResult_.workerWindow);
-    } else if (desktopResolveResult_.progmanWindow != nullptr &&
-               IsWindow(desktopResolveResult_.progmanWindow)) {
-        backgroundWindow_.SetDesktopHostWindow(desktopResolveResult_.progmanWindow);
+               IsWindow(desktopResolveResult_.backgroundAnchorWindow)) {
+        backgroundWindow_.SetDesktopHostWindow(
+            desktopResolveResult_.backgroundAnchorWindow,
+            Background::DesktopHostLayer::BehindExplorerIcons);
+        selectedBackgroundHostStrategy = desktopResolveResult_.backgroundAnchorStrategy;
     } else {
-        backgroundWindow_.SetDesktopHostWindow(nullptr);
+        backgroundWindow_.SetDesktopHostWindow(nullptr, Background::DesktopHostLayer::Fallback);
+        selectedBackgroundHostStrategy = L"NoSafeBackgroundHost";
     }
 
     backgroundWindow_.SetVirtualDesktopRect(display.virtualDesktopRect);
@@ -1575,7 +1573,8 @@ bool AppController::UpdateBackgroundWindow() {
 
     Infrastructure::Logger::Get().Info(
         L"[Background] UpdateBackgroundWindow fenceCount=" + std::to_wstring(backgroundFenceRects.size()) +
-        L"; anchorStrategy=" + desktopResolveResult_.backgroundAnchorStrategy);
+        L"; resolverAnchorStrategy=" + desktopResolveResult_.backgroundAnchorStrategy +
+        L"; selectedHostStrategy=" + selectedBackgroundHostStrategy);
     if (backgroundFenceRects.empty()) {
         backgroundWindow_.Hide();
         Infrastructure::Logger::Get().Info(L"[Background] no managed fences: hide background window.");
@@ -1583,7 +1582,14 @@ bool AppController::UpdateBackgroundWindow() {
     }
 
     backgroundWindow_.Show();
-    Infrastructure::Logger::Get().Info(L"[Background] primary path active: using BackgroundWindow as real desktop background layer.");
+    if (!backgroundWindow_.IsVisible()) {
+        Infrastructure::Logger::Get().Error(
+            L"[Background] primary path unavailable: no safe visible BackgroundWindow host.");
+        return false;
+    }
+
+    Infrastructure::Logger::Get().Info(
+        L"[Background] primary path active: using BackgroundWindow as real desktop background layer.");
     return true;
 }
 
@@ -3066,7 +3072,9 @@ void AppController::LogDesktopResolveDiagnostics() const {
     summary += L"; workerClass=" + desktopResolveResult_.workerClassName;
     summary += L"; workerAfterDefViewClass=" + desktopResolveResult_.workerAfterDefViewClassName;
     summary += L"; backgroundAnchorClass=" + desktopResolveResult_.backgroundAnchorClassName;
+    summary += L"; backgroundAnchorParentClass=" + desktopResolveResult_.backgroundAnchorParentClassName;
     summary += L"; overlayAnchorClass=" + desktopResolveResult_.overlayAnchorClassName;
+    summary += L"; overlayAnchorParentClass=" + desktopResolveResult_.overlayAnchorParentClassName;
     summary += L"; defViewClass=" + desktopResolveResult_.shellDefViewClassName;
     summary += L"; listViewClass=" + desktopResolveResult_.listViewClassName;
     if (!desktopResolveResult_.failureStep.empty()) {
@@ -3120,9 +3128,11 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
             L" (" + desktopResolveResult_.workerAfterDefViewClassName + L")\r\n";
     text += L"Background Anchor: " + HandleToString(desktopResolveResult_.backgroundAnchorWindow) +
             L" (" + desktopResolveResult_.backgroundAnchorClassName + L")\r\n";
+    text += L"Background Anchor Parent Class: " + desktopResolveResult_.backgroundAnchorParentClassName + L"\r\n";
     text += L"Background Strategy: " + desktopResolveResult_.backgroundAnchorStrategy + L"\r\n";
     text += L"Overlay Anchor: " + HandleToString(desktopResolveResult_.overlayAnchorWindow) +
             L" (" + desktopResolveResult_.overlayAnchorClassName + L")\r\n";
+    text += L"Overlay Anchor Parent Class: " + desktopResolveResult_.overlayAnchorParentClassName + L"\r\n";
     text += L"Overlay Strategy: " + desktopResolveResult_.overlayAnchorStrategy + L"\r\n";
     text += L"SHELLDLL_DefView: " + HandleToString(desktopResolveResult_.shellDefViewWindow) +
             L" (" + desktopResolveResult_.shellDefViewClassName + L")\r\n";

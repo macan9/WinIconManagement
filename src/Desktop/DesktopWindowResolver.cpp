@@ -28,6 +28,13 @@ std::wstring GetWindowClassName(HWND window) {
     return std::wstring(buffer.data(), static_cast<size_t>(length));
 }
 
+std::wstring GetParentWindowClassName(HWND window) {
+    if (window == nullptr || !IsWindow(window)) {
+        return L"<null>";
+    }
+    return GetWindowClassName(GetParent(window));
+}
+
 bool IsWindowClass(HWND window, const wchar_t* className) {
     if (window == nullptr || className == nullptr) {
         return false;
@@ -35,11 +42,49 @@ bool IsWindowClass(HWND window, const wchar_t* className) {
     return GetWindowClassName(window) == className;
 }
 
+bool IsWindowEffectivelyVisible(HWND window) {
+    HWND current = window;
+    while (current != nullptr && IsWindow(current)) {
+        if (IsWindowVisible(current) == FALSE) {
+            return false;
+        }
+        current = GetParent(current);
+    }
+    return window != nullptr && IsWindow(window);
+}
+
 bool HasShellDefViewChild(HWND parentWindow) {
     if (parentWindow == nullptr) {
         return false;
     }
     return FindWindowExW(parentWindow, nullptr, L"SHELLDLL_DefView", nullptr) != nullptr;
+}
+
+bool LooksLikeDesktopSizedWindow(HWND window) {
+    if (window == nullptr || !IsWindow(window) || IsWindowVisible(window) == FALSE) {
+        return false;
+    }
+
+    RECT windowRect{};
+    RECT clientRect{};
+    if (!GetWindowRect(window, &windowRect) || !GetClientRect(window, &clientRect)) {
+        return false;
+    }
+
+    const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int virtualWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int virtualHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    const int width = windowRect.right - windowRect.left;
+    const int height = windowRect.bottom - windowRect.top;
+    const int clientWidth = clientRect.right - clientRect.left;
+    const int clientHeight = clientRect.bottom - clientRect.top;
+    return windowRect.left <= virtualLeft &&
+           windowRect.top <= virtualTop &&
+           width >= virtualWidth &&
+           height >= virtualHeight &&
+           clientWidth > 0 &&
+           clientHeight > 0;
 }
 
 void TrySpawnWorkerWindow(HWND progmanWindow) {
@@ -85,7 +130,9 @@ BOOL CALLBACK EnumWindowsForShellDefView(HWND topLevelWindow, LPARAM lParam) {
 }
 
 HWND ChooseWorkerAfterDefView(const ShellDefViewSearchContext& context) {
-    if (context.workerWindowAfterParent != nullptr && IsWindow(context.workerWindowAfterParent)) {
+    if (context.workerWindowAfterParent != nullptr &&
+        IsWindow(context.workerWindowAfterParent) &&
+        LooksLikeDesktopSizedWindow(context.workerWindowAfterParent)) {
         return context.workerWindowAfterParent;
     }
 
@@ -97,6 +144,9 @@ HWND ChooseWorkerAfterDefView(const ShellDefViewSearchContext& context) {
             continue;
         }
         if (HasShellDefViewChild(workerWindow)) {
+            continue;
+        }
+        if (!LooksLikeDesktopSizedWindow(workerWindow)) {
             continue;
         }
         return workerWindow;
@@ -116,6 +166,7 @@ void FillOverlayAnchor(Desktop::DesktopResolveResult* result) {
     if (result->workerWindowAfterDefView != nullptr && IsWindow(result->workerWindowAfterDefView)) {
         result->overlayAnchorWindow = result->workerWindowAfterDefView;
         result->overlayAnchorClassName = GetWindowClassName(result->overlayAnchorWindow);
+        result->overlayAnchorParentClassName = GetParentWindowClassName(result->overlayAnchorWindow);
         result->overlayAnchorStrategy = L"WorkerWAfterDefView";
         return;
     }
@@ -123,6 +174,7 @@ void FillOverlayAnchor(Desktop::DesktopResolveResult* result) {
     if (result->workerWindow != nullptr && IsWindow(result->workerWindow)) {
         result->overlayAnchorWindow = result->workerWindow;
         result->overlayAnchorClassName = GetWindowClassName(result->overlayAnchorWindow);
+        result->overlayAnchorParentClassName = GetParentWindowClassName(result->overlayAnchorWindow);
         result->overlayAnchorStrategy = L"DefViewParent";
         return;
     }
@@ -130,6 +182,7 @@ void FillOverlayAnchor(Desktop::DesktopResolveResult* result) {
     if (result->progmanWindow != nullptr && IsWindow(result->progmanWindow)) {
         result->overlayAnchorWindow = result->progmanWindow;
         result->overlayAnchorClassName = GetWindowClassName(result->overlayAnchorWindow);
+        result->overlayAnchorParentClassName = GetParentWindowClassName(result->overlayAnchorWindow);
         result->overlayAnchorStrategy = L"ProgmanFallback";
     }
 }
@@ -143,32 +196,17 @@ void FillBackgroundAnchor(Desktop::DesktopResolveResult* result) {
     result->backgroundAnchorClassName = L"<null>";
     result->backgroundAnchorStrategy = L"none";
 
-    if (result->workerWindowAfterDefView != nullptr && IsWindow(result->workerWindowAfterDefView)) {
+    if (result->workerWindowAfterDefView != nullptr &&
+        IsWindow(result->workerWindowAfterDefView) &&
+        LooksLikeDesktopSizedWindow(result->workerWindowAfterDefView)) {
         result->backgroundAnchorWindow = result->workerWindowAfterDefView;
         result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
+        result->backgroundAnchorParentClassName = GetParentWindowClassName(result->backgroundAnchorWindow);
         result->backgroundAnchorStrategy = L"WorkerWAfterDefView";
         return;
     }
 
-    if (result->workerWindow != nullptr && IsWindow(result->workerWindow)) {
-        result->backgroundAnchorWindow = result->workerWindow;
-        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
-        result->backgroundAnchorStrategy = L"DefViewParent";
-        return;
-    }
-
-    if (result->progmanWindow != nullptr && IsWindow(result->progmanWindow)) {
-        result->backgroundAnchorWindow = result->progmanWindow;
-        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
-        result->backgroundAnchorStrategy = L"ProgmanFallback";
-        return;
-    }
-
-    if (result->shellDefViewWindow != nullptr && IsWindow(result->shellDefViewWindow)) {
-        result->backgroundAnchorWindow = result->shellDefViewWindow;
-        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
-        result->backgroundAnchorStrategy = L"ShellDefViewLastResort";
-    }
+    result->backgroundAnchorStrategy = L"NoSafeWorkerWAfterDefView";
 }
 }  // namespace
 

@@ -3,6 +3,8 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <string>
 #include <sstream>
 #include <utility>
@@ -12,14 +14,17 @@
 namespace {
 constexpr wchar_t kOverlayWindowClassName[] = L"WinIconManagement.OverlayWindow";
 constexpr int kFenceCornerRadiusPixels = 10;
-constexpr COLORREF kFenceFillColor = RGB(76, 143, 255);
-constexpr COLORREF kFenceBorderColor = RGB(36, 99, 235);
-constexpr COLORREF kFenceActiveFillColor = RGB(34, 197, 94);
-constexpr COLORREF kFenceActiveBorderColor = RGB(21, 128, 61);
-constexpr BYTE kFenceFillAlpha = 70;
-constexpr BYTE kFenceEditFillAlpha = 28;
-constexpr int kFenceBorderWidth = 2;
-constexpr int kFenceActiveBorderWidth = 3;
+constexpr COLORREF kFenceFillColor = RGB(202, 231, 214);
+constexpr COLORREF kFenceBorderColor = RGB(62, 132, 95);
+constexpr COLORREF kFenceActiveFillColor = RGB(171, 221, 191);
+constexpr COLORREF kFenceActiveBorderColor = RGB(38, 108, 71);
+constexpr BYTE kFenceFixedWindowAlpha = 160;
+constexpr BYTE kFenceFillAlpha = 64;
+constexpr BYTE kFenceEditFillAlpha = 40;
+constexpr BYTE kFenceLayeredBodyFillAlpha = 112;
+constexpr BYTE kFenceLayeredBodyBorderAlpha = 208;
+constexpr int kFenceBorderWidth = 1;
+constexpr int kFenceActiveBorderWidth = 2;
 constexpr COLORREF kSelectionFillColor = RGB(59, 130, 246);
 constexpr COLORREF kSelectionBorderColor = RGB(37, 99, 235);
 constexpr int kSelectionBorderWidth = 2;
@@ -39,8 +44,8 @@ constexpr COLORREF kCancelButtonHoverColor = RGB(88, 99, 120);
 constexpr COLORREF kConfirmTextColor = RGB(238, 244, 255);
 constexpr int kActiveFenceResizeHandleSize = 28;
 constexpr int kActiveFenceResizeHandleMargin = 0;
-constexpr COLORREF kActiveFenceResizeHandleColor = RGB(236, 253, 245);
-constexpr COLORREF kActiveFenceResizeHandleBorderColor = RGB(22, 163, 74);
+constexpr COLORREF kActiveFenceResizeHandleColor = RGB(232, 247, 239);
+constexpr COLORREF kActiveFenceResizeHandleBorderColor = RGB(52, 120, 84);
 constexpr int kActiveFenceDeleteButtonSize = 20;
 constexpr int kActiveFenceDeleteButtonMargin = 6;
 constexpr int kActiveFenceMoveAreaHeight = 36;
@@ -73,6 +78,7 @@ OverlayWindow::OverlayWindow()
       visible_(false),
       paintLogged_(false),
       currentLayeredAlpha_(0),
+      usingPerPixelLayeredMode_(false),
       hoverHitTarget_(InteractionHitTarget::Transparent),
       activeFenceDragMode_(ActiveFenceDragMode::None),
       activeFenceDragStartPoint_{0, 0},
@@ -143,9 +149,10 @@ void OverlayWindow::Hide() {
 void OverlayWindow::SetFixedMode(bool fixedMode) {
     fixedMode_ = fixedMode;
     if (IsInitialized()) {
+        ApplyRoundedRegion();
         ApplyLayeredAttributes();
         ApplyClickThroughStyle();
-        InvalidateRect(window_, nullptr, TRUE);
+        RefreshPresentation();
     }
     Infrastructure::Logger::Get().Info(
         L"[Overlay] SetFixedMode: " + std::wstring(fixedMode_ ? L"fixed" : L"edit"));
@@ -159,7 +166,7 @@ void OverlayWindow::SetFenceRects(const std::vector<RECT>& fenceRects) {
     }
     if (IsInitialized()) {
         ApplyRoundedRegion();
-        InvalidateRect(window_, nullptr, TRUE);
+        RefreshPresentation();
     }
     Infrastructure::Logger::Get().Info(
         L"[Overlay] SetFenceRects: count=" + std::to_wstring(fenceRects_.size()));
@@ -172,7 +179,7 @@ void OverlayWindow::SetFenceRect(const RECT& fenceRect) {
     fenceRects_.push_back(fenceRect_);
     if (IsInitialized()) {
         ApplyRoundedRegion();
-        InvalidateRect(window_, nullptr, TRUE);
+        RefreshPresentation();
     }
     Infrastructure::Logger::Get().Info(
         L"[Overlay] SetFenceRect: left=" + std::to_wstring(fenceRect_.left) +
@@ -190,7 +197,7 @@ void OverlayWindow::SetFencePresentation(
         activeFenceIndex_.reset();
     }
     if (IsInitialized()) {
-        InvalidateRect(window_, nullptr, TRUE);
+        RefreshPresentation();
     }
 }
 
@@ -204,15 +211,15 @@ void OverlayWindow::SetVirtualDesktopRect(const RECT& virtualDesktopRect) {
     const int height = std::max(1, static_cast<int>(virtualDesktopRect_.bottom - virtualDesktopRect_.top));
     SetWindowPos(
         window_,
-        HWND_BOTTOM,
+        nullptr,
         virtualDesktopRect_.left,
         virtualDesktopRect_.top,
         width,
         height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+        SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
     EnsureDesktopLayerZOrder();
     ApplyRoundedRegion();
-    InvalidateRect(window_, nullptr, TRUE);
+    RefreshPresentation();
     Infrastructure::Logger::Get().Info(
         L"[Overlay] SetVirtualDesktopRect: left=" + std::to_wstring(virtualDesktopRect_.left) +
         L", top=" + std::to_wstring(virtualDesktopRect_.top) +
@@ -224,6 +231,7 @@ void OverlayWindow::SetDesktopHostWindow(HWND desktopHostWindow) {
     desktopHostWindow_ = desktopHostWindow;
     if (IsInitialized()) {
         EnsureDesktopLayerZOrder();
+        RefreshPresentation();
     }
     std::wstringstream stream;
     stream << L"[Overlay] SetDesktopHostWindow: 0x" << std::hex << std::uppercase
@@ -252,6 +260,7 @@ void OverlayWindow::SetSelectionRect(const RECT& selectionRect) {
         ApplyRoundedRegion();
         ApplyLayeredAttributes();
         InvalidateSelectionRectDelta(hadSelectionRect ? &previousSelectionRect : nullptr);
+        RefreshPresentation();
     }
 }
 
@@ -272,13 +281,10 @@ void OverlayWindow::ClearSelectionRect() {
         ApplyLayeredAttributes();
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
-        if (selectionConfirmVisible_) {
-            InvalidateRect(window_, nullptr, FALSE);
-        } else if (hadSelectionRect) {
+        if (hadSelectionRect) {
             InvalidateSelectionRectDelta(&previousSelectionRect);
-        } else {
-            InvalidateRect(window_, nullptr, FALSE);
         }
+        RefreshPresentation();
     }
 }
 
@@ -296,7 +302,7 @@ void OverlayWindow::ShowSelectionConfirm(const RECT& selectionRect, const POINT&
         ApplyLayeredAttributes();
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
-        InvalidateRect(window_, nullptr, TRUE);
+        RefreshPresentation();
     }
 }
 
@@ -313,7 +319,7 @@ void OverlayWindow::HideSelectionConfirm() {
         ApplyLayeredAttributes();
         ApplyClickThroughStyle();
         ApplyRoundedRegion();
-        InvalidateRect(window_, nullptr, TRUE);
+        RefreshPresentation();
     }
 }
 
@@ -537,7 +543,48 @@ void OverlayWindow::ApplyRoundedRegion() {
     if (!IsInitialized()) {
         return;
     }
+
     NormalizeFenceRects();
+
+    if (!fixedMode_ || hasSelectionRect_ || selectionConfirmVisible_ || fenceRects_.empty()) {
+        SetWindowRgn(window_, nullptr, TRUE);
+        return;
+    }
+
+    HRGN combinedRegion = CreateRectRgn(0, 0, 0, 0);
+    if (combinedRegion == nullptr) {
+        return;
+    }
+
+    bool hasVisibleRegion = false;
+    for (const RECT& fenceRect : fenceRects_) {
+        const int offsetX = fenceRect.left - virtualDesktopRect_.left;
+        const int offsetY = fenceRect.top - virtualDesktopRect_.top;
+        const int width = std::max(1, static_cast<int>(fenceRect.right - fenceRect.left));
+        const int height = std::max(1, static_cast<int>(fenceRect.bottom - fenceRect.top));
+        HRGN fenceRegion = CreateRoundRectRgn(
+            offsetX,
+            offsetY,
+            offsetX + width + 1,
+            offsetY + height + 1,
+            kFenceCornerRadiusPixels * 2,
+            kFenceCornerRadiusPixels * 2);
+        if (fenceRegion == nullptr) {
+            continue;
+        }
+
+        CombineRgn(combinedRegion, combinedRegion, fenceRegion, RGN_OR);
+        DeleteObject(fenceRegion);
+        hasVisibleRegion = true;
+    }
+
+    if (!hasVisibleRegion) {
+        DeleteObject(combinedRegion);
+        SetWindowRgn(window_, nullptr, TRUE);
+        return;
+    }
+
+    SetWindowRgn(window_, combinedRegion, TRUE);
 }
 
 void OverlayWindow::ApplyClickThroughStyle() {
@@ -567,7 +614,8 @@ void OverlayWindow::ApplyLayeredAttributes() {
         return;
     }
 
-    BYTE alpha = static_cast<BYTE>(fixedMode_ ? 255 : std::max<BYTE>(kSelectionOnlyAlpha, kFenceEditFillAlpha));
+    BYTE alpha = static_cast<BYTE>(
+        fixedMode_ ? kFenceFixedWindowAlpha : std::max<BYTE>(kSelectionOnlyAlpha, kFenceEditFillAlpha));
     if (hasSelectionRect_) {
         alpha = std::max(alpha, kSelectionOnlyAlpha);
     }
@@ -582,6 +630,259 @@ void OverlayWindow::ApplyLayeredAttributes() {
         return;
     }
     currentLayeredAlpha_ = alpha;
+}
+
+void OverlayWindow::RefreshPresentation() {
+    if (!IsInitialized()) {
+        return;
+    }
+
+    InvalidateRect(window_, nullptr, TRUE);
+    UpdateWindow(window_);
+}
+
+bool OverlayWindow::RefreshFixedLayeredWindow() {
+    RECT clientRect{};
+    GetClientRect(window_, &clientRect);
+    const int width = std::max(1L, clientRect.right - clientRect.left);
+    const int height = std::max(1L, clientRect.bottom - clientRect.top);
+
+    HDC screenDc = GetDC(nullptr);
+    if (screenDc == nullptr) {
+        return false;
+    }
+
+    HDC memoryDc = CreateCompatibleDC(screenDc);
+    if (memoryDc == nullptr) {
+        ReleaseDC(nullptr, screenDc);
+        return false;
+    }
+
+    BITMAPINFO bitmapInfo{};
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(memoryDc, &bitmapInfo, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (dib == nullptr || bits == nullptr) {
+        if (dib != nullptr) {
+            DeleteObject(dib);
+        }
+        DeleteDC(memoryDc);
+        ReleaseDC(nullptr, screenDc);
+        return false;
+    }
+
+    std::memset(bits, 0, static_cast<size_t>(width) * static_cast<size_t>(height) * 4U);
+    HGDIOBJ oldBitmap = SelectObject(memoryDc, dib);
+
+    RenderFenceRectsToLayeredBitmap(bits, width, height);
+
+    POINT srcPoint{0, 0};
+    SIZE windowSize{width, height};
+    POINT dstPoint{virtualDesktopRect_.left, virtualDesktopRect_.top};
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+
+    const BOOL updated = UpdateLayeredWindow(
+        window_,
+        screenDc,
+        &dstPoint,
+        &windowSize,
+        memoryDc,
+        &srcPoint,
+        0,
+        &blend,
+        ULW_ALPHA);
+
+    SelectObject(memoryDc, oldBitmap);
+    DeleteObject(dib);
+    DeleteDC(memoryDc);
+    ReleaseDC(nullptr, screenDc);
+
+    if (!updated) {
+        Infrastructure::Logger::Get().Error(
+            L"[Overlay] UpdateLayeredWindow failed. error=" + std::to_wstring(GetLastError()));
+        return false;
+    }
+
+    usingPerPixelLayeredMode_ = true;
+    currentLayeredAlpha_ = 255;
+    return true;
+}
+
+void OverlayWindow::RenderFenceRects(HDC hdc) const {
+    if (fenceRects_.empty()) {
+        return;
+    }
+
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(255, 255, 255));
+
+    for (size_t i = 0; i < fenceRects_.size(); ++i) {
+        const RECT& fenceRect = fenceRects_[i];
+        const bool isActiveFence = activeFenceIndex_.has_value() && *activeFenceIndex_ == i;
+        const int offsetX = fenceRect.left - virtualDesktopRect_.left;
+        const int offsetY = fenceRect.top - virtualDesktopRect_.top;
+        RECT localFenceRect{
+            offsetX,
+            offsetY,
+            offsetX + std::max(1, static_cast<int>(fenceRect.right - fenceRect.left)),
+            offsetY + std::max(1, static_cast<int>(fenceRect.bottom - fenceRect.top))};
+
+        const COLORREF fillColor = isActiveFence ? kFenceActiveFillColor : kFenceFillColor;
+        const COLORREF borderColor = isActiveFence ? kFenceActiveBorderColor : kFenceBorderColor;
+        const int borderWidth = isActiveFence ? kFenceActiveBorderWidth : kFenceBorderWidth;
+
+        HBRUSH fillBrush = CreateSolidBrush(fillColor);
+        HPEN borderPen = CreatePen(PS_SOLID, borderWidth, borderColor);
+        HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
+        HGDIOBJ oldPen = SelectObject(hdc, borderPen);
+
+        RoundRect(
+            hdc,
+            localFenceRect.left,
+            localFenceRect.top,
+            localFenceRect.right,
+            localFenceRect.bottom,
+            kFenceCornerRadiusPixels * 2,
+            kFenceCornerRadiusPixels * 2);
+
+        SelectObject(hdc, oldPen);
+        SelectObject(hdc, oldBrush);
+        DeleteObject(borderPen);
+        DeleteObject(fillBrush);
+
+        RECT titleRect{
+            localFenceRect.left + 12,
+            localFenceRect.top + 10,
+            localFenceRect.right - 12,
+            localFenceRect.top + 32};
+        std::wstring title = L"Desktop Group";
+        if (i < fenceTitles_.size() && !fenceTitles_[i].empty()) {
+            title = fenceTitles_[i];
+        }
+        if (isActiveFence) {
+            title += L" [Active]";
+        }
+        DrawTextW(hdc, title.c_str(), -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+}
+
+void OverlayWindow::RenderFenceRectsToLayeredBitmap(void* bits, int width, int height) const {
+    if (bits == nullptr || width <= 0 || height <= 0 || fenceRects_.empty()) {
+        return;
+    }
+
+    struct BgraPixel {
+        uint8_t blue;
+        uint8_t green;
+        uint8_t red;
+        uint8_t alpha;
+    };
+
+    const auto writePixel = [bits, width, height](int x, int y, COLORREF color, uint8_t alpha) {
+        if (x < 0 || y < 0 || x >= width || y >= height || alpha == 0) {
+            return;
+        }
+
+        auto* pixels = static_cast<BgraPixel*>(bits);
+        BgraPixel& pixel = pixels[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)];
+        const uint32_t invAlpha = static_cast<uint32_t>(255 - alpha);
+        pixel.blue = static_cast<uint8_t>((GetBValue(color) * alpha + pixel.blue * invAlpha) / 255);
+        pixel.green = static_cast<uint8_t>((GetGValue(color) * alpha + pixel.green * invAlpha) / 255);
+        pixel.red = static_cast<uint8_t>((GetRValue(color) * alpha + pixel.red * invAlpha) / 255);
+        pixel.alpha = static_cast<uint8_t>(std::min<uint32_t>(255, alpha + (pixel.alpha * invAlpha) / 255));
+    };
+
+    const auto drawRoundedRect = [&writePixel](
+                                     int left,
+                                     int top,
+                                     int right,
+                                     int bottom,
+                                     int radius,
+                                     COLORREF fillColor,
+                                     uint8_t fillAlpha,
+                                     COLORREF borderColor,
+                                     uint8_t borderAlpha,
+                                     int borderWidth) {
+        if (left >= right || top >= bottom) {
+            return;
+        }
+
+        const int clampedRadius = std::max(0, std::min(radius, std::min((right - left) / 2, (bottom - top) / 2)));
+        for (int y = top; y < bottom; ++y) {
+            for (int x = left; x < right; ++x) {
+                bool insideOuter = true;
+                if (clampedRadius > 0) {
+                    if (x < left + clampedRadius && y < top + clampedRadius) {
+                        const int dx = x - (left + clampedRadius);
+                        const int dy = y - (top + clampedRadius);
+                        insideOuter = (dx * dx + dy * dy) <= (clampedRadius * clampedRadius);
+                    } else if (x >= right - clampedRadius && y < top + clampedRadius) {
+                        const int dx = x - (right - clampedRadius - 1);
+                        const int dy = y - (top + clampedRadius);
+                        insideOuter = (dx * dx + dy * dy) <= (clampedRadius * clampedRadius);
+                    } else if (x < left + clampedRadius && y >= bottom - clampedRadius) {
+                        const int dx = x - (left + clampedRadius);
+                        const int dy = y - (bottom - clampedRadius - 1);
+                        insideOuter = (dx * dx + dy * dy) <= (clampedRadius * clampedRadius);
+                    } else if (x >= right - clampedRadius && y >= bottom - clampedRadius) {
+                        const int dx = x - (right - clampedRadius - 1);
+                        const int dy = y - (bottom - clampedRadius - 1);
+                        insideOuter = (dx * dx + dy * dy) <= (clampedRadius * clampedRadius);
+                    }
+                }
+
+                if (!insideOuter) {
+                    continue;
+                }
+
+                bool isBorder = false;
+                for (int offset = 0; offset < borderWidth; ++offset) {
+                    const int innerLeft = left + offset + 1;
+                    const int innerTop = top + offset + 1;
+                    const int innerRight = right - offset - 1;
+                    const int innerBottom = bottom - offset - 1;
+                    if (x < innerLeft || x >= innerRight || y < innerTop || y >= innerBottom) {
+                        isBorder = true;
+                        break;
+                    }
+                }
+
+                writePixel(x, y, isBorder ? borderColor : fillColor, isBorder ? borderAlpha : fillAlpha);
+            }
+        }
+    };
+
+    for (size_t i = 0; i < fenceRects_.size(); ++i) {
+        const RECT& fenceRect = fenceRects_[i];
+        const bool isActiveFence = activeFenceIndex_.has_value() && *activeFenceIndex_ == i;
+        const int left = std::max(0L, fenceRect.left - virtualDesktopRect_.left);
+        const int top = std::max(0L, fenceRect.top - virtualDesktopRect_.top);
+        const int right = std::min(static_cast<LONG>(width), fenceRect.right - virtualDesktopRect_.left);
+        const int bottom = std::min(static_cast<LONG>(height), fenceRect.bottom - virtualDesktopRect_.top);
+        const COLORREF fillColor = isActiveFence ? kFenceActiveFillColor : kFenceFillColor;
+        const COLORREF borderColor = isActiveFence ? kFenceActiveBorderColor : kFenceBorderColor;
+        const int borderWidth = isActiveFence ? kFenceActiveBorderWidth : kFenceBorderWidth;
+        drawRoundedRect(
+            left,
+            top,
+            right,
+            bottom,
+            kFenceCornerRadiusPixels,
+            fillColor,
+            kFenceLayeredBodyFillAlpha,
+            borderColor,
+            kFenceLayeredBodyBorderAlpha,
+            borderWidth);
+    }
 }
 
 void OverlayWindow::NormalizeFenceRect() {
@@ -660,16 +961,11 @@ void OverlayWindow::EnsureDesktopLayerZOrder() const {
     if (!IsInitialized()) {
         return;
     }
-    // Keep overlay in desktop layer: above wallpaper but not above normal app windows.
-    HWND insertAfter = HWND_BOTTOM;
-    if (desktopHostWindow_ != nullptr && IsWindow(desktopHostWindow_)) {
-        insertAfter = desktopHostWindow_;
-    } else if (ownerWindow_ != nullptr && IsWindow(ownerWindow_)) {
-        insertAfter = ownerWindow_;
-    }
+    // Do not attach/reorder against Explorer desktop hosts here. A bad WorkerW/Progman anchor can promote
+    // this desktop-sized layered window into a visible veil over the taskbar.
     SetWindowPos(
         window_,
-        insertAfter,
+        HWND_BOTTOM,
         0,
         0,
         0,
@@ -712,7 +1008,9 @@ void OverlayWindow::Paint(HWND hwnd) {
             const int borderWidth = isActiveFence ? kFenceActiveBorderWidth : kFenceBorderWidth;
 
             HPEN borderPen = CreatePen(PS_SOLID, borderWidth, borderColor);
-            HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+            HGDIOBJ oldBrush = SelectObject(
+                hdc,
+                GetStockObject(HOLLOW_BRUSH));
             HGDIOBJ oldPen = SelectObject(hdc, borderPen);
 
             RoundRect(
@@ -728,8 +1026,8 @@ void OverlayWindow::Paint(HWND hwnd) {
             SelectObject(hdc, oldBrush);
             DeleteObject(borderPen);
 
-            // Only show a subtle title-band tint in edit mode so desktop icons remain visually unobstructed.
-            if (!fixedMode_) {
+            // Overlay only renders a narrow title band for legibility; the real fence body belongs to BackgroundWindow.
+            {
                 const int titleBandBottom = std::min(localFenceRect.bottom, localFenceRect.top + kActiveFenceMoveAreaHeight);
                 if (titleBandBottom > localFenceRect.top) {
                     RECT titleBandRect{
