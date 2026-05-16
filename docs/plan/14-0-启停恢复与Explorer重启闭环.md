@@ -1,4 +1,4 @@
-# 12 启停恢复、Explorer 重启与异常恢复闭环
+# 14-0 启停恢复、Explorer 重启与异常恢复闭环
 
 ## 目标
 
@@ -33,11 +33,11 @@
 
 本阶段是可靠性收口，按以下子阶段推进：
 
-- [14-1-正常退出恢复.md](/d:/MyProjects/WinIconManagement/docs/plan/14-1-正常退出恢复.md)
-- [14-2-再次启动恢复.md](/d:/MyProjects/WinIconManagement/docs/plan/14-2-再次启动恢复.md)
-- [14-3-Explorer重启恢复.md](/d:/MyProjects/WinIconManagement/docs/plan/14-3-Explorer重启恢复.md)
-- [14-4-异常退出保护.md](/d:/MyProjects/WinIconManagement/docs/plan/14-4-异常退出保护.md)
-- [14-5-恢复回归测试.md](/d:/MyProjects/WinIconManagement/docs/plan/14-5-恢复回归测试.md)
+- [14-1-正常退出恢复.md](./14-1-正常退出恢复.md)
+- [14-2-再次启动恢复.md](./14-2-再次启动恢复.md)
+- [14-3-Explorer重启恢复.md](./14-3-Explorer重启恢复.md)
+- [14-4-异常退出保护.md](./14-4-异常退出保护.md)
+- [14-5-恢复回归测试.md](./14-5-恢复回归测试.md)
 
 ## 产出物
 

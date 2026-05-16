@@ -2,15 +2,32 @@
 
 #include <windows.h>
 
+#include <cwctype>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
+
+namespace {
+std::wstring ToLowerCopy(std::wstring_view value) {
+    std::wstring lowered(value);
+    for (wchar_t& ch : lowered) {
+        ch = static_cast<wchar_t>(towlower(ch));
+    }
+    return lowered;
+}
+}
 
 namespace Persistence {
 std::wstring BuildIconIdentity(const Desktop::DesktopIcon& icon) {
     std::wstringstream stream;
-    stream << L"name=";
-    stream << (icon.displayName.empty() ? L"<empty>" : icon.displayName);
-    stream << L"|index=" << icon.index;
+    if (!icon.parsingPath.empty()) {
+        stream << L"shell=" << ToLowerCopy(icon.parsingPath);
+        return stream.str();
+    }
+
+    const std::wstring_view displayName =
+        icon.displayName.empty() ? std::wstring_view(L"<empty>") : std::wstring_view(icon.displayName);
+    stream << L"name=" << ToLowerCopy(displayName);
     return stream.str();
 }
 

@@ -28,6 +28,14 @@ struct AppSettingRecord {
     std::wstring updatedAtUtc;
 };
 
+struct RestoreSessionRecord {
+    long long id = 1;
+    std::wstring lastExitMode;
+    bool lastShutdownClean = true;
+    bool lastRestoreNeeded = false;
+    std::wstring updatedAtUtc;
+};
+
 struct FenceRecord {
     long long id = 0;
     std::wstring name;

@@ -1,9 +1,14 @@
 #include "Desktop/DesktopIconService.h"
 
 #include <CommCtrl.h>
+#include <shlobj_core.h>
+#include <shlwapi.h>
 
 #include <algorithm>
+#include <cwctype>
+#include <memory>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 #include "Infrastructure/Win32Handles.h"
@@ -14,6 +19,122 @@ constexpr SIZE_T kIconTextMaxChars = 512;
 constexpr int kMinDesktopCoordinate = -32768;
 constexpr int kMaxDesktopCoordinate = 32767;
 constexpr int kDesktopHitTestUnavailable = -2;
+
+struct PidlDeleter {
+    void operator()(ITEMIDLIST* value) const {
+        if (value != nullptr) {
+            CoTaskMemFree(value);
+        }
+    }
+};
+
+using UniquePidl = std::unique_ptr<ITEMIDLIST, PidlDeleter>;
+
+struct DesktopShellItem {
+    std::wstring displayName;
+    std::wstring parsingPath;
+};
+
+std::wstring NormalizeNameKey(const std::wstring& value) {
+    std::wstring normalized = value;
+    for (wchar_t& ch : normalized) {
+        ch = static_cast<wchar_t>(towlower(ch));
+    }
+    return normalized;
+}
+
+bool ReadShellDisplayName(IShellFolder* shellFolder, PCUITEMID_CHILD childPidl, SHGDNF flags, std::wstring* outText) {
+    if (shellFolder == nullptr || childPidl == nullptr || outText == nullptr) {
+        return false;
+    }
+
+    STRRET strret{};
+    if (FAILED(shellFolder->GetDisplayNameOf(childPidl, flags, &strret))) {
+        return false;
+    }
+
+    wchar_t buffer[MAX_PATH * 4]{};
+    if (FAILED(StrRetToBufW(&strret, childPidl, buffer, ARRAYSIZE(buffer)))) {
+        return false;
+    }
+
+    *outText = buffer;
+    return !outText->empty();
+}
+
+std::vector<DesktopShellItem> EnumerateDesktopShellItems() {
+    std::vector<DesktopShellItem> items;
+
+    IShellFolder* desktopFolder = nullptr;
+    if (FAILED(SHGetDesktopFolder(&desktopFolder)) || desktopFolder == nullptr) {
+        return items;
+    }
+
+    IEnumIDList* enumerator = nullptr;
+    const HRESULT enumResult = desktopFolder->EnumObjects(
+        nullptr,
+        SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_INCLUDEHIDDEN,
+        &enumerator);
+    if (FAILED(enumResult) || enumerator == nullptr) {
+        desktopFolder->Release();
+        return items;
+    }
+
+    LPITEMIDLIST rawChildPidl = nullptr;
+    while (enumerator->Next(1, &rawChildPidl, nullptr) == S_OK) {
+        UniquePidl childPidl(rawChildPidl);
+        rawChildPidl = nullptr;
+        const auto child = reinterpret_cast<PCUITEMID_CHILD>(childPidl.get());
+
+        DesktopShellItem item{};
+        if (!ReadShellDisplayName(desktopFolder, child, SHGDN_NORMAL, &item.displayName)) {
+            continue;
+        }
+        if (!ReadShellDisplayName(desktopFolder, child, SHGDN_FORPARSING, &item.parsingPath)) {
+            item.parsingPath.clear();
+        }
+        items.push_back(std::move(item));
+    }
+
+    enumerator->Release();
+    desktopFolder->Release();
+    return items;
+}
+
+void AttachStableShellIdentity(std::vector<Desktop::DesktopIcon>* icons) {
+    if (icons == nullptr || icons->empty()) {
+        return;
+    }
+
+    const std::vector<DesktopShellItem> shellItems = EnumerateDesktopShellItems();
+    if (shellItems.empty()) {
+        return;
+    }
+
+    std::unordered_map<std::wstring, std::vector<std::wstring>> parsingPathsByName;
+    parsingPathsByName.reserve(shellItems.size());
+    for (const DesktopShellItem& item : shellItems) {
+        parsingPathsByName[NormalizeNameKey(item.displayName)].push_back(item.parsingPath);
+    }
+
+    std::unordered_map<std::wstring, size_t> nextPathIndexByName;
+    nextPathIndexByName.reserve(parsingPathsByName.size());
+    for (Desktop::DesktopIcon& icon : *icons) {
+        const std::wstring key = NormalizeNameKey(icon.displayName);
+        const auto found = parsingPathsByName.find(key);
+        if (found == parsingPathsByName.end() || found->second.empty()) {
+            continue;
+        }
+
+        const size_t nextIndex = nextPathIndexByName[key];
+        if (nextIndex >= found->second.size()) {
+            continue;
+        }
+
+        icon.parsingPath = found->second[nextIndex];
+        nextPathIndexByName[key] = nextIndex + 1;
+    }
+}
 
 bool SendListViewMessage(
     HWND listViewWindow,
@@ -280,6 +401,7 @@ std::vector<DesktopIcon> DesktopIconService::EnumerateDesktopIcons(
 
         icons.push_back(std::move(icon));
     }
+    AttachStableShellIdentity(&icons);
     return icons;
 }
 

@@ -1,6 +1,7 @@
 #include "Persistence/Schema.h"
 
 #include <array>
+#include <span>
 #include <string_view>
 
 namespace Persistence {
@@ -58,6 +59,24 @@ constexpr std::array<std::string_view, 6> kSchemaV1Sql = {
 
     "CREATE INDEX IF NOT EXISTS idx_snapshot_icons_snapshot_id "
     "ON SnapshotIcons(snapshot_id);"};
+
+constexpr std::array<std::string_view, 1> kSchemaV2Sql = {
+    "CREATE TABLE IF NOT EXISTS RestoreSessions ("
+    "  id INTEGER PRIMARY KEY CHECK(id = 1),"
+    "  last_exit_mode TEXT NOT NULL DEFAULT 'unknown',"
+    "  last_shutdown_clean INTEGER NOT NULL DEFAULT 1,"
+    "  last_restore_needed INTEGER NOT NULL DEFAULT 0,"
+    "  updated_at_utc TEXT NOT NULL"
+    ");"};
+
+bool ApplyStatements(Database& database, std::span<const std::string_view> statements) {
+    for (const std::string_view sql : statements) {
+        if (!database.Execute(sql)) {
+            return false;
+        }
+    }
+    return true;
+}
 }
 
 bool EnsureSchema(Database& database) {
@@ -77,18 +96,22 @@ bool EnsureSchema(Database& database) {
         return false;
     }
 
-    for (const std::string_view sql : kSchemaV1Sql) {
-        if (!database.Execute(sql)) {
+    if (currentVersion < 1) {
+        if (!ApplyStatements(database, kSchemaV1Sql) ||
+            !database.SetUserVersion(1)) {
             const bool rolledBack = database.RollbackTransaction();
             (void)rolledBack;
             return false;
         }
     }
 
-    if (!database.SetUserVersion(kDatabaseSchemaVersion)) {
-        const bool rolledBack = database.RollbackTransaction();
-        (void)rolledBack;
-        return false;
+    if (currentVersion < 2) {
+        if (!ApplyStatements(database, kSchemaV2Sql) ||
+            !database.SetUserVersion(2)) {
+            const bool rolledBack = database.RollbackTransaction();
+            (void)rolledBack;
+            return false;
+        }
     }
 
     if (!database.CommitTransaction()) {

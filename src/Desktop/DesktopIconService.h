@@ -9,6 +9,7 @@ namespace Desktop {
 struct DesktopIcon {
     int index = -1;
     std::wstring displayName;
+    std::wstring parsingPath;
     POINT position{0, 0};
 };
 

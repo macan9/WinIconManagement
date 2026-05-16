@@ -13,6 +13,7 @@ public:
     [[nodiscard]] long long CreateFence(const FenceRecord& fence);
     [[nodiscard]] bool UpdateFence(const FenceRecord& fence);
     [[nodiscard]] bool DeleteFence(long long fenceId);
+    [[nodiscard]] bool DeleteAllFences();
     [[nodiscard]] bool ReplaceFenceIcons(long long fenceId, const std::vector<FenceIconRecord>& icons);
     [[nodiscard]] std::vector<FenceRecord> ListFences();
     [[nodiscard]] std::vector<FenceIconRecord> ListFenceIcons(long long fenceId);

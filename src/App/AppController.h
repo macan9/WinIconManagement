@@ -4,6 +4,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Desktop/DesktopIconService.h"
@@ -11,6 +12,7 @@
 #include "Interaction/MouseController.h"
 #include "Persistence/Database.h"
 #include "Persistence/FenceRepository.h"
+#include "Persistence/RestoreSessionRepository.h"
 #include "Persistence/SettingsRepository.h"
 #include "Persistence/SnapshotRepository.h"
 #include "Overlay/OverlayWindow.h"
@@ -48,6 +50,10 @@ private:
         Delete = 3,
     };
 
+    enum class DesktopControlMode {
+        ExplorerDriven = 0,
+    };
+
     struct FenceEditState {
         bool active = false;
         FenceEditHitTarget target = FenceEditHitTarget::None;
@@ -77,11 +83,16 @@ private:
     bool EnsureDesktopAndIconsReady();
     void CacheOriginalIconPositions();
     bool InitializePersistence();
+    void LoadBasicSettings();
+    void LoadRestoreSession();
+    void PersistRuntimeRestoreSession(std::wstring_view reason);
+    void PersistCleanShutdownRestoreSession(std::wstring_view exitMode, bool restoreNeededAfterExit);
     void PersistBasicSettings();
     void PersistIconSnapshot(const std::wstring& name, const std::wstring& source);
     void ReloadManagedFences();
     void LoadActiveFenceSetting();
     void PersistActiveFenceSetting();
+    void ApplyExplorerDrivenRuntimeState(bool fromReconnect);
     [[nodiscard]] std::optional<long long> FindManagedFenceIdAtPoint(const POINT& point) const;
     [[nodiscard]] std::optional<size_t> FindManagedFenceIndexById(long long fenceId) const;
     void SetActiveFence(std::optional<long long> fenceId);
@@ -123,7 +134,7 @@ private:
     void EndFenceEditDrag(bool commitChanges);
     void ApplyFencePreviewBounds(long long fenceId, const RECT& bounds);
     bool MoveTestDesktopIcon();
-    bool RestoreOriginalDesktopLayout();
+    bool RestoreOriginalDesktopLayout(bool keepManagedFencesForNextLaunch);
     void UpdateWindowTitle();
     void UpdateOverlayWindow();
     void UpdateDpiMetrics(UINT dpi);
@@ -150,8 +161,10 @@ private:
     std::wstring lastGridMoveSummary_;
     Persistence::Database database_;
     Persistence::FenceRepository fenceRepository_;
+    Persistence::RestoreSessionRepository restoreSessionRepository_;
     Persistence::SettingsRepository settingsRepository_;
     Persistence::SnapshotRepository snapshotRepository_;
+    Persistence::RestoreSessionRecord restoreSession_;
     Overlay::OverlayWindow overlayWindow_;
     Interaction::MouseController mouseController_;
     bool persistenceReady_;
@@ -166,5 +179,7 @@ private:
     bool isPaused_;
     bool isExiting_;
     bool isDesktopConnected_;
+    bool shouldRestoreManagedFences_;
+    DesktopControlMode desktopControlMode_;
 };
 }  // namespace App

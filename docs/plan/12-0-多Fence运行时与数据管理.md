@@ -1,4 +1,4 @@
-# 10 多 Fence 运行时与数据管理
+# 12-0 多 Fence 运行时与数据管理
 
 ## 目标
 
@@ -10,11 +10,7 @@
 
 - 将当前“单活动 Fence”状态扩展为 Fence 集合
 - 为每个 Fence 分配稳定 `fence_id`
-- 区分：
-  - 正式 Fence
-  - 临时框选 Fence
-  - 待确认 Fence
-  - 当前活动 Fence
+- 区分正式 Fence、临时框选 Fence、待确认 Fence、当前活动 Fence
 - 支持连续创建多个 Fence
 - 每次确认创建后追加新 Fence，而不是覆盖当前 Fence
 - 统一绘制多个 Fence 背景
@@ -26,11 +22,11 @@
 
 本阶段任务较重，按以下子阶段推进：
 
-- [12-1-Fence集合运行时.md](/d:/MyProjects/WinIconManagement/docs/plan/12-1-Fence集合运行时.md)
-- [12-2-多Fence显示与活动态.md](/d:/MyProjects/WinIconManagement/docs/plan/12-2-多Fence显示与活动态.md)
-- [12-3-多Fence创建与加载.md](/d:/MyProjects/WinIconManagement/docs/plan/12-3-多Fence创建与加载.md)
-- [12-4-多Fence数据管理.md](/d:/MyProjects/WinIconManagement/docs/plan/12-4-多Fence数据管理.md)
-- [12-5-多Fence交互边界.md](/d:/MyProjects/WinIconManagement/docs/plan/12-5-多Fence交互边界.md)
+- [12-1-Fence集合运行时.md](./12-1-Fence集合运行时.md)
+- [12-2-多Fence显示与活动态.md](./12-2-多Fence显示与活动态.md)
+- [12-3-多Fence创建与加载.md](./12-3-多Fence创建与加载.md)
+- [12-4-多Fence数据管理.md](./12-4-多Fence数据管理.md)
+- [12-5-多Fence交互边界.md](./12-5-多Fence交互边界.md)
 
 ## 产出物
 

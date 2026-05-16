@@ -76,6 +76,16 @@ bool FenceRepository::DeleteFence(long long fenceId) {
            sqlite3_changes(database_->NativeHandle()) > 0;
 }
 
+bool FenceRepository::DeleteAllFences() {
+    if (database_ == nullptr || !database_->IsOpen()) {
+        return false;
+    }
+
+    Statement deleteAll;
+    return database_->Prepare("DELETE FROM Fences;", &deleteAll) &&
+           deleteAll.Step() == SQLITE_DONE;
+}
+
 bool FenceRepository::ReplaceFenceIcons(long long fenceId, const std::vector<FenceIconRecord>& icons) {
     if (database_ == nullptr || !database_->IsOpen() || fenceId <= 0) {
         return false;

@@ -567,7 +567,7 @@ void OverlayWindow::NormalizeFenceRect() {
 
 void OverlayWindow::NormalizeFenceRects() {
     if (fenceRects_.empty()) {
-        fenceRects_.push_back(fenceRect_);
+        return;
     }
 
     for (RECT& fenceRect : fenceRects_) {
@@ -610,7 +610,7 @@ void OverlayWindow::Paint(HWND hwnd) {
     FillRect(hdc, &clientRect, clearBrush);
     DeleteObject(clearBrush);
 
-    if (!hasSelectionRect_) {
+    if (!hasSelectionRect_ && !fenceRects_.empty()) {
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(255, 255, 255));
         for (size_t i = 0; i < fenceRects_.size(); ++i) {
@@ -662,7 +662,7 @@ void OverlayWindow::Paint(HWND hwnd) {
             DrawTextW(hdc, title.c_str(), -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         }
 
-        if (!fixedMode_ && !hasSelectionRect_ && activeFenceIndex_.has_value()) {
+        if (!fixedMode_ && activeFenceIndex_.has_value()) {
             DrawActiveFenceDeleteButton(hdc);
             DrawActiveFenceResizeHandle(hdc);
         }

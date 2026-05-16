@@ -564,8 +564,10 @@ AppController::AppController(HINSTANCE instance)
       lastGridMoveSummary_(L"Not executed."),
       database_(),
       fenceRepository_(&database_),
+      restoreSessionRepository_(&database_),
       settingsRepository_(&database_),
       snapshotRepository_(&database_),
+      restoreSession_{},
       persistenceReady_(false),
       trayCallbackMessage_(kTrayCallbackMessage),
       taskbarCreatedMessage_(RegisterWindowMessageW(L"TaskbarCreated")),
@@ -577,7 +579,9 @@ AppController::AppController(HINSTANCE instance)
       isPinned_(false),
       isPaused_(false),
       isExiting_(false),
-      isDesktopConnected_(false) {}
+      isDesktopConnected_(false),
+      shouldRestoreManagedFences_(false),
+      desktopControlMode_(DesktopControlMode::ExplorerDriven) {}
 
 AppController::~AppController() {
     mouseController_.Stop();
@@ -606,6 +610,9 @@ bool AppController::Initialize() {
     if (!CreateMainWindow()) {
         return false;
     }
+    if (!InitializePersistence()) {
+        Infrastructure::Logger::Get().Error(L"Persistence initialization failed.");
+    }
     if (!InitializeTray()) {
         return false;
     }
@@ -621,9 +628,6 @@ bool AppController::Initialize() {
             [this]() { (void)DeleteActiveFence(); });
         UpdateOverlayWindow();
         overlayWindow_.Show();
-    }
-    if (!InitializePersistence()) {
-        Infrastructure::Logger::Get().Error(L"Persistence initialization failed.");
     }
 
     mouseController_.SetCallbacks(
@@ -665,12 +669,90 @@ bool AppController::InitializePersistence() {
     }
 
     persistenceReady_ = true;
+    LoadBasicSettings();
     ReloadManagedFences();
     LoadActiveFenceSetting();
+    LoadRestoreSession();
+    PersistRuntimeRestoreSession(L"startup");
     Infrastructure::Logger::Get().Info(
         L"[Persistence] ready. dbPath=" + databasePath.wstring() +
         L"; schemaVersion=" + std::to_wstring(Persistence::kDatabaseSchemaVersion));
     return true;
+}
+
+void AppController::LoadBasicSettings() {
+    if (!persistenceReady_) {
+        return;
+    }
+
+    std::wstring value;
+    if (settingsRepository_.TryGet(L"is_pinned", &value)) {
+        isPinned_ = (value == L"1");
+    }
+    if (settingsRepository_.TryGet(L"is_paused", &value)) {
+        isPaused_ = (value == L"1");
+    }
+}
+
+void AppController::LoadRestoreSession() {
+    restoreSession_ = Persistence::RestoreSessionRecord{};
+    if (!persistenceReady_) {
+        shouldRestoreManagedFences_ = false;
+        return;
+    }
+
+    const std::optional<Persistence::RestoreSessionRecord> loaded = restoreSessionRepository_.Load();
+    if (loaded.has_value()) {
+        restoreSession_ = *loaded;
+    } else {
+        restoreSession_.id = 1;
+        restoreSession_.lastExitMode = L"initial_bootstrap";
+        restoreSession_.lastShutdownClean = managedFences_.empty();
+        restoreSession_.lastRestoreNeeded = !managedFences_.empty();
+        restoreSession_.updatedAtUtc = Persistence::UtcNowIso8601();
+        if (!restoreSessionRepository_.Save(restoreSession_)) {
+            Infrastructure::Logger::Get().Error(L"[Persistence] initialize restore session failed.");
+        }
+    }
+
+    shouldRestoreManagedFences_ =
+        (restoreSession_.lastRestoreNeeded || !restoreSession_.lastShutdownClean) &&
+        !managedFences_.empty();
+    Infrastructure::Logger::Get().Info(
+        L"[Persistence] restore session loaded. exitMode=" + restoreSession_.lastExitMode +
+        L"; clean=" + std::wstring(restoreSession_.lastShutdownClean ? L"true" : L"false") +
+        L"; restoreNeeded=" + std::wstring(restoreSession_.lastRestoreNeeded ? L"true" : L"false") +
+        L"; managedFenceCount=" + std::to_wstring(managedFences_.size()));
+}
+
+void AppController::PersistRuntimeRestoreSession(std::wstring_view reason) {
+    if (!persistenceReady_) {
+        return;
+    }
+
+    restoreSession_.id = 1;
+    restoreSession_.lastExitMode = std::wstring(reason);
+    restoreSession_.lastShutdownClean = false;
+    restoreSession_.lastRestoreNeeded = shouldRestoreManagedFences_ && !managedFences_.empty();
+    restoreSession_.updatedAtUtc = Persistence::UtcNowIso8601();
+    if (!restoreSessionRepository_.Save(restoreSession_)) {
+        Infrastructure::Logger::Get().Error(L"[Persistence] save runtime restore session failed.");
+    }
+}
+
+void AppController::PersistCleanShutdownRestoreSession(std::wstring_view exitMode, bool restoreNeededAfterExit) {
+    if (!persistenceReady_) {
+        return;
+    }
+
+    restoreSession_.id = 1;
+    restoreSession_.lastExitMode = std::wstring(exitMode);
+    restoreSession_.lastShutdownClean = true;
+    restoreSession_.lastRestoreNeeded = restoreNeededAfterExit;
+    restoreSession_.updatedAtUtc = Persistence::UtcNowIso8601();
+    if (!restoreSessionRepository_.Save(restoreSession_)) {
+        Infrastructure::Logger::Get().Error(L"[Persistence] save clean shutdown restore session failed.");
+    }
 }
 
 void AppController::PersistBasicSettings() {
@@ -929,6 +1011,31 @@ bool AppController::EnsureDesktopAndIconsReady() {
         return false;
     }
     return true;
+}
+
+void AppController::ApplyExplorerDrivenRuntimeState(bool fromReconnect) {
+    mouseController_.SetDesktopListViewWindow(desktopResolveResult_.listViewWindow);
+    mouseController_.SetEnabled(false);
+
+    if (!isDesktopConnected_) {
+        return;
+    }
+
+    mouseController_.SetEnabled(true);
+    RefreshDesktopIconSnapshot();
+    if (shouldRestoreManagedFences_ && !managedFences_.empty()) {
+        const bool restoredManagedFences = RestoreManagedFenceLayout(false);
+        Infrastructure::Logger::Get().Info(
+            L"[ExplorerDriven] managed fence restore=" +
+            std::wstring(restoredManagedFences ? L"true" : L"false") +
+            L"; fromReconnect=" + std::wstring(fromReconnect ? L"true" : L"false") +
+            L"; fenceCount=" + std::to_wstring(managedFences_.size()));
+    } else {
+        Infrastructure::Logger::Get().Info(
+            L"[ExplorerDriven] desktop connected without pending fence restore. fromReconnect=" +
+            std::wstring(fromReconnect ? L"true" : L"false") +
+            L"; fenceCount=" + std::to_wstring(managedFences_.size()));
+    }
 }
 
 int AppController::Run() {
@@ -1371,7 +1478,7 @@ void AppController::UpdateOverlayWindow() {
     overlayWindow_.SetVirtualDesktopRect(display.virtualDesktopRect);
     std::vector<RECT> overlayFenceRects;
     std::vector<std::wstring> overlayFenceTitles;
-    overlayFenceRects.reserve(std::max<size_t>(managedFences_.size(), 1));
+    overlayFenceRects.reserve(managedFences_.size());
     overlayFenceTitles.reserve(managedFences_.size());
     for (const ManagedFenceState& managedFence : managedFences_) {
         overlayFenceRects.push_back(managedFence.record.bounds);
@@ -1379,9 +1486,6 @@ void AppController::UpdateOverlayWindow() {
         title += L" #" + std::to_wstring(managedFence.record.id);
         title += L" (" + std::to_wstring(managedFence.icons.size()) + L")";
         overlayFenceTitles.push_back(std::move(title));
-    }
-    if (overlayFenceRects.empty()) {
-        overlayFenceRects.push_back(GetPrimaryOverlayFenceRect());
     }
 
     overlayWindow_.SetFenceRects(overlayFenceRects);
@@ -1391,8 +1495,10 @@ void AppController::UpdateOverlayWindow() {
     }
     overlayWindow_.SetFencePresentation(overlayFenceTitles, activeFenceIndex);
     overlayWindow_.SetFixedMode(!isPaused_);
+    const std::wstring primaryFenceText =
+        overlayFenceRects.empty() ? std::wstring(L"none") : RectToString(overlayFenceRects.front());
     Infrastructure::Logger::Get().Info(
-        L"[Overlay] UpdateOverlayWindow primaryFence=" + RectToString(overlayFenceRects.front()) +
+        L"[Overlay] UpdateOverlayWindow mode=ExplorerDriven; primaryFence=" + primaryFenceText +
         L"; managedFenceCount=" + std::to_wstring(managedFences_.size()) +
         L"; activeFence=" +
         (activeFenceId_.has_value() ? std::to_wstring(*activeFenceId_) : std::wstring(L"none")));
@@ -1586,7 +1692,7 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
             break;
         case IDM_TRAY_RESTORE_LAYOUT:
             Infrastructure::Logger::Get().Info(L"Tray command: Restore layout.");
-            if (!RestoreOriginalDesktopLayout()) {
+            if (!RestoreOriginalDesktopLayout(false)) {
                 MessageBoxW(
                     hwnd,
                     L"Restore layout failed. Please run batch grid move once and check the log.",
@@ -1617,13 +1723,17 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
             }
             break;
         case IDM_TRAY_EXIT:
+        {
             isExiting_ = true;
             Infrastructure::Logger::Get().Info(L"Tray command: Exit.");
-            if (!RestoreOriginalDesktopLayout()) {
+            const bool restoreNeededAfterExit = !managedFences_.empty();
+            if (!RestoreOriginalDesktopLayout(true)) {
                 Infrastructure::Logger::Get().Error(L"[Exit] restore original desktop layout failed before shutdown.");
             }
+            PersistCleanShutdownRestoreSession(L"clean_exit", restoreNeededAfterExit);
             DestroyWindow(hwnd);
             break;
+        }
         default:
             break;
     }
@@ -1698,19 +1808,9 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
                           Desktop::DesktopWindowResolver::IsWindowChainValid(desktopResolveResult_);
 
     LogDesktopResolveDiagnostics();
-    mouseController_.SetDesktopListViewWindow(desktopResolveResult_.listViewWindow);
-    mouseController_.SetEnabled(false);
 
     if (isDesktopConnected_) {
-        mouseController_.SetEnabled(true);
-        RefreshDesktopIconSnapshot();
-        if (!managedFences_.empty()) {
-            const bool restoredManagedFences = RestoreManagedFenceLayout(false);
-            Infrastructure::Logger::Get().Info(
-                L"[Startup] managed fence restore=" +
-                std::wstring(restoredManagedFences ? L"true" : L"false") +
-                L"; fenceCount=" + std::to_wstring(managedFences_.size()));
-        }
+        ApplyExplorerDrivenRuntimeState(fromManualReconnect);
         UpdateOverlayWindow();
         if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
             InvalidateRect(mainWindow_, nullptr, TRUE);
@@ -1873,7 +1973,7 @@ bool AppController::MoveTestDesktopIcon() {
     return movedCount > 0;
 }
 
-bool AppController::RestoreOriginalDesktopLayout() {
+bool AppController::RestoreOriginalDesktopLayout(bool keepManagedFencesForNextLaunch) {
     if (!EnsureDesktopConnection()) {
         desktopIconReadStatus_ = L"Restore failed: desktop connection unavailable.";
         lastGridMoveSummary_ = L"Restore failed: desktop connection unavailable.";
@@ -1919,10 +2019,18 @@ bool AppController::RestoreOriginalDesktopLayout() {
 
     RefreshDesktopIconSnapshot();
     PersistIconSnapshot(L"after_restore", L"auto");
-    managedFences_.clear();
+    if (!keepManagedFencesForNextLaunch) {
+        if (!managedFences_.empty() && !fenceRepository_.DeleteAllFences()) {
+            Infrastructure::Logger::Get().Error(L"[Persistence] delete managed fences failed after restore.");
+        }
+        ReloadManagedFences();
+        SetActiveFence(std::nullopt);
+        shouldRestoreManagedFences_ = false;
+        PersistRuntimeRestoreSession(L"manual_restore");
+    }
+
     temporarySelection_.active = false;
     pendingFenceCreation_.reset();
-    activeFenceId_.reset();
     UpdateOverlayWindow();
     if (movedCount == expected) {
         desktopIconReadStatus_ = L"Restore completed.";
@@ -2213,6 +2321,8 @@ bool AppController::RenameActiveFence(HWND ownerWindow) {
         L"[Fence] renamed active fence. id=" + std::to_wstring(updatedRecord.id) +
         L"; name=" + updatedRecord.name);
     ReloadManagedFences();
+    shouldRestoreManagedFences_ = !managedFences_.empty();
+    PersistRuntimeRestoreSession(L"rename_fence");
     UpdateOverlayWindow();
     UpdateDiagnosticsTextControl();
     return true;
@@ -2322,6 +2432,8 @@ bool AppController::UpdateActiveFenceBounds(const RECT& bounds) {
         L"[Fence] updated active fence bounds. id=" + std::to_wstring(updatedRecord.id) +
         L"; bounds=" + RectToString(updatedRecord.bounds));
     ReloadManagedFences();
+    shouldRestoreManagedFences_ = !managedFences_.empty();
+    PersistRuntimeRestoreSession(L"update_fence_bounds");
     UpdateOverlayWindow();
     UpdateDiagnosticsTextControl();
     return true;
@@ -2395,6 +2507,8 @@ bool AppController::DeleteActiveFence() {
         L"[Fence] deleted active fence. id=" + std::to_wstring(deletedFenceId));
     SetActiveFence(std::nullopt);
     ReloadManagedFences();
+    shouldRestoreManagedFences_ = !managedFences_.empty();
+    PersistRuntimeRestoreSession(L"delete_fence");
     UpdateOverlayWindow();
     UpdateDiagnosticsTextControl();
     return true;
@@ -2517,6 +2631,8 @@ void AppController::ApplyFenceFromSelectionRect(const RECT& selectionRect) {
     }
 
     ReloadManagedFences();
+    shouldRestoreManagedFences_ = !managedFences_.empty();
+    PersistRuntimeRestoreSession(L"create_fence");
     if (createdFenceId > 0) {
         SetActiveFence(createdFenceId);
     } else {
@@ -2766,6 +2882,7 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
     text += L"Read Icons: " + std::to_wstring(desktopIcons_.size()) + L"\r\n";
     text += L"Read Status: " + desktopIconReadStatus_ + L"\r\n";
     text += L"Batch Move Summary: " + lastGridMoveSummary_ + L"\r\n";
+    text += L"Control Mode: ExplorerDriven\r\n";
     text += L"Persistence: " + std::wstring(persistenceReady_ ? L"ready" : L"not ready") + L"\r\n";
     text += L"Managed Fences: " + std::to_wstring(managedFences_.size()) + L"\r\n";
     text += L"Active Fence: ";

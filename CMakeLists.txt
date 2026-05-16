@@ -25,6 +25,7 @@ add_executable(WinIconManagement WIN32
     src/Persistence/SettingsRepository.cpp
     src/Persistence/FenceRepository.cpp
     src/Persistence/SnapshotRepository.cpp
+    src/Persistence/RestoreSessionRepository.cpp
     resources/app.rc
 )
 
@@ -47,6 +48,7 @@ else()
 endif()
 
 target_link_libraries(WinIconManagement PRIVATE
+    ole32
     user32
     shell32
     shlwapi
