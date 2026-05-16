@@ -30,6 +30,7 @@ constexpr int kSelectionMinWidth = 40;
 constexpr int kSelectionMinHeight = 40;
 constexpr int kFenceInnerPadding = 16;
 constexpr int kFenceResizeStep = 48;
+constexpr int kFenceMoveHandleHeight = 36;
 constexpr int kRenameDialogWidth = 360;
 constexpr int kRenameDialogHeight = 132;
 constexpr int kRenameEditControlId = 5001;
@@ -1322,7 +1323,13 @@ AppController::FenceEditHitTarget AppController::HitTestFenceEditTarget(long lon
         return FenceEditHitTarget::Resize;
     }
 
-    return FenceEditHitTarget::Move;
+    RECT moveRect = bounds;
+    moveRect.bottom = std::min(moveRect.bottom, moveRect.top + kFenceMoveHandleHeight);
+    if (PtInRect(&moveRect, point) != FALSE) {
+        return FenceEditHitTarget::Move;
+    }
+
+    return FenceEditHitTarget::None;
 }
 
 void AppController::ApplyFencePreviewBounds(long long fenceId, const RECT& bounds) {
