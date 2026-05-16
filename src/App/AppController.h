@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "Background/BackgroundWindow.h"
+#include "Desktop/DesktopBackgroundRenderer.h"
 #include "Desktop/DesktopIconService.h"
 #include "Desktop/DesktopWindowResolver.h"
 #include "Interaction/MouseController.h"
@@ -141,6 +143,9 @@ private:
     bool MoveTestDesktopIcon();
     bool RestoreOriginalDesktopLayout(bool keepManagedFencesForNextLaunch);
     void UpdateWindowTitle();
+    bool UpdateBackgroundWindow();
+    void ApplyBackgroundFallbackState();
+    void CleanupWindowResources(HWND windowHandle);
     void UpdateOverlayWindow();
     void UpdateDpiMetrics(UINT dpi);
     void ApplyDpiFonts();
@@ -170,6 +175,8 @@ private:
     Persistence::SettingsRepository settingsRepository_;
     Persistence::SnapshotRepository snapshotRepository_;
     Persistence::RestoreSessionRecord restoreSession_;
+    Background::BackgroundWindow backgroundWindow_;
+    Desktop::DesktopBackgroundRenderer desktopBackgroundRenderer_;
     Overlay::OverlayWindow overlayWindow_;
     Interaction::MouseController mouseController_;
     bool persistenceReady_;
@@ -185,6 +192,12 @@ private:
     bool isExiting_;
     bool isDesktopConnected_;
     bool shouldRestoreManagedFences_;
+    HWND backgroundListViewCandidate_;
+    int backgroundListViewStableTicks_;
+    bool desktopBackgroundApplyPending_;
+    int desktopBackgroundApplyRetryCount_;
+    bool desktopBackgroundFallbackNeeded_;
+    bool windowResourcesCleanedUp_;
     DesktopControlMode desktopControlMode_;
 };
 }  // namespace App

@@ -11,6 +11,8 @@ add_executable(WinIconManagement WIN32
     src/main.cpp
     src/App/AppController.cpp
     src/App/SingleInstance.cpp
+    src/Background/BackgroundWindow.cpp
+    src/Desktop/DesktopBackgroundRenderer.cpp
     src/Desktop/DesktopIconService.cpp
     src/Desktop/DesktopWindowResolver.cpp
     src/Overlay/OverlayWindow.cpp

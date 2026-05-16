@@ -11,6 +11,7 @@ struct DesktopResolveResult {
     HWND progmanWindow = nullptr;
     HWND workerWindow = nullptr;
     HWND workerWindowAfterDefView = nullptr;
+    HWND backgroundAnchorWindow = nullptr;
     HWND overlayAnchorWindow = nullptr;
     HWND shellDefViewWindow = nullptr;
     HWND listViewWindow = nullptr;
@@ -19,6 +20,8 @@ struct DesktopResolveResult {
     std::wstring progmanClassName;
     std::wstring workerClassName;
     std::wstring workerAfterDefViewClassName;
+    std::wstring backgroundAnchorClassName;
+    std::wstring backgroundAnchorStrategy;
     std::wstring overlayAnchorClassName;
     std::wstring overlayAnchorStrategy;
     std::wstring shellDefViewClassName;

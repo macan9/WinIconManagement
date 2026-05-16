@@ -265,9 +265,7 @@ bool MouseController::HandleMouseEvent(WPARAM wParam, const MSLLHOOKSTRUCT* data
             if (selectionActive_) {
                 UpdateSelectionRect(point);
             }
-            // Swallow drag-move input once we own the gesture so Explorer does not
-            // repaint desktop hover/selection visuals underneath our preview.
-            return true;
+            return false;
         case WM_LBUTTONUP:
             if (!leftButtonDown_) {
                 return false;

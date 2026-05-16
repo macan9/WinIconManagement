@@ -133,6 +133,43 @@ void FillOverlayAnchor(Desktop::DesktopResolveResult* result) {
         result->overlayAnchorStrategy = L"ProgmanFallback";
     }
 }
+
+void FillBackgroundAnchor(Desktop::DesktopResolveResult* result) {
+    if (result == nullptr) {
+        return;
+    }
+
+    result->backgroundAnchorWindow = nullptr;
+    result->backgroundAnchorClassName = L"<null>";
+    result->backgroundAnchorStrategy = L"none";
+
+    if (result->shellDefViewWindow != nullptr && IsWindow(result->shellDefViewWindow)) {
+        result->backgroundAnchorWindow = result->shellDefViewWindow;
+        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
+        result->backgroundAnchorStrategy = L"ShellDefView";
+        return;
+    }
+
+    if (result->workerWindowAfterDefView != nullptr && IsWindow(result->workerWindowAfterDefView)) {
+        result->backgroundAnchorWindow = result->workerWindowAfterDefView;
+        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
+        result->backgroundAnchorStrategy = L"WorkerWAfterDefView";
+        return;
+    }
+
+    if (result->workerWindow != nullptr && IsWindow(result->workerWindow)) {
+        result->backgroundAnchorWindow = result->workerWindow;
+        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
+        result->backgroundAnchorStrategy = L"DefViewParent";
+        return;
+    }
+
+    if (result->progmanWindow != nullptr && IsWindow(result->progmanWindow)) {
+        result->backgroundAnchorWindow = result->progmanWindow;
+        result->backgroundAnchorClassName = GetWindowClassName(result->backgroundAnchorWindow);
+        result->backgroundAnchorStrategy = L"ProgmanFallback";
+    }
+}
 }  // namespace
 
 namespace Desktop {
@@ -191,6 +228,7 @@ DesktopResolveResult DesktopWindowResolver::Resolve() const {
     GetWindowThreadProcessId(result.listViewWindow, &processId);
     result.explorerProcessId = processId;
 
+    FillBackgroundAnchor(&result);
     FillOverlayAnchor(&result);
     result.success = true;
     return result;

@@ -19,6 +19,8 @@ constexpr wchar_t kMainWindowClassName[] = L"WinIconManagement.MainWindow";
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT_PTR kDesktopHealthTimerId = 1;
 constexpr UINT kDesktopHealthIntervalMs = 3000;
+constexpr int kDesktopBackgroundStableTickThreshold = 2;
+constexpr int kDesktopBackgroundRetryLimit = 4;
 constexpr UINT kDefaultDpi = 96;
 constexpr int kGridPaddingPixels = 16;
 constexpr int kMinimumGridSpacing = 48;
@@ -37,6 +39,8 @@ constexpr int kRenameEditControlId = 5001;
 constexpr int kRenamePromptControlId = 5002;
 constexpr int kRenameOkButtonId = IDOK;
 constexpr int kRenameCancelButtonId = IDCANCEL;
+constexpr bool kSkipExitRestoreForDiagnostics = true;
+constexpr bool kMinimalExplorerDrivenRuntimeForDiagnostics = true;
 
 std::wstring TrimWhitespace(const std::wstring& value) {
     size_t start = 0;
@@ -143,9 +147,11 @@ INT_PTR CALLBACK RenameFenceDialogProc(HWND hwnd, UINT message, WPARAM wParam, L
                 case kRenameOkButtonId: {
                     HWND edit = GetDlgItem(hwnd, kRenameEditControlId);
                     const int length = edit != nullptr ? GetWindowTextLengthW(edit) : 0;
-                    std::wstring value(static_cast<size_t>(length), L'\0');
+                    std::wstring value;
                     if (edit != nullptr && length > 0) {
-                        GetWindowTextW(edit, value.data(), length + 1);
+                        value.resize(static_cast<size_t>(length) + 1, L'\0');
+                        const int copied = GetWindowTextW(edit, value.data(), length + 1);
+                        value.resize(copied > 0 ? static_cast<size_t>(copied) : 0U);
                     }
                     value = TrimWhitespace(value);
                     if (value.empty()) {
@@ -306,6 +312,12 @@ std::wstring RectToString(const RECT& rect) {
 std::wstring PointToString(const POINT& point) {
     std::wstringstream stream;
     stream << L"(" << point.x << L"," << point.y << L")";
+    return stream.str();
+}
+
+std::wstring PointerToString(const void* value) {
+    std::wstringstream stream;
+    stream << L"0x" << std::hex << std::uppercase << reinterpret_cast<uintptr_t>(value);
     return stream.str();
 }
 
@@ -569,6 +581,7 @@ AppController::AppController(HINSTANCE instance)
       settingsRepository_(&database_),
       snapshotRepository_(&database_),
       restoreSession_{},
+      backgroundWindow_(),
       persistenceReady_(false),
       trayCallbackMessage_(kTrayCallbackMessage),
       taskbarCreatedMessage_(RegisterWindowMessageW(L"TaskbarCreated")),
@@ -582,17 +595,28 @@ AppController::AppController(HINSTANCE instance)
       isExiting_(false),
       isDesktopConnected_(false),
       shouldRestoreManagedFences_(false),
+      backgroundListViewCandidate_(nullptr),
+      backgroundListViewStableTicks_(0),
+      desktopBackgroundApplyPending_(true),
+      desktopBackgroundApplyRetryCount_(0),
+      desktopBackgroundFallbackNeeded_(false),
+      windowResourcesCleanedUp_(false),
       desktopControlMode_(DesktopControlMode::ExplorerDriven) {}
 
 AppController::~AppController() {
+    Infrastructure::Logger::Get().Info(
+        L"[App] AppController destructor begin. this=" + PointerToString(this) +
+        L"; mainWindow_=" + HandleToString(mainWindow_) +
+        L"; overlayWindow=" + PointerToString(&overlayWindow_) +
+        L"; backgroundWindow=" + PointerToString(&backgroundWindow_) +
+        L"; mouseController=" + PointerToString(&mouseController_));
     mouseController_.Stop();
     if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
-        KillTimer(mainWindow_, desktopHealthTimerId_);
-    }
-    trayIcon_.Remove();
-    if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
+        CleanupWindowResources(mainWindow_);
         DestroyWindow(mainWindow_);
         mainWindow_ = nullptr;
+    } else {
+        CleanupWindowResources(nullptr);
     }
     if (uiFont_ != nullptr) {
         DeleteObject(uiFont_);
@@ -602,9 +626,18 @@ AppController::~AppController() {
         DeleteObject(titleFont_);
         titleFont_ = nullptr;
     }
+    Infrastructure::Logger::Get().Info(
+        L"[App] AppController destructor end. this=" + PointerToString(this));
 }
 
 bool AppController::Initialize() {
+    Infrastructure::Logger::Get().Info(
+        L"[App] Initialize begin. this=" + PointerToString(this) +
+        L"; mainWindowMember=" + PointerToString(&mainWindow_) +
+        L"; desktopResolveResult=" + PointerToString(&desktopResolveResult_) +
+        L"; temporarySelection=" + PointerToString(&temporarySelection_) +
+        L"; pendingFenceCreation=" + PointerToString(&pendingFenceCreation_) +
+        L"; fenceEditState=" + PointerToString(&fenceEditState_));
     if (!RegisterWindowClass()) {
         return false;
     }
@@ -616,6 +649,12 @@ bool AppController::Initialize() {
     }
     if (!InitializeTray()) {
         return false;
+    }
+    if (!backgroundWindow_.Initialize(instance_, nullptr)) {
+        Infrastructure::Logger::Get().Error(L"[Background] initialization failed.");
+    } else {
+        UpdateBackgroundWindow();
+        backgroundWindow_.Show();
     }
     // Overlay runs as an independent top-level window and should not be owned by main window.
     if (!overlayWindow_.Initialize(instance_, nullptr)) {
@@ -1019,6 +1058,15 @@ void AppController::ApplyExplorerDrivenRuntimeState(bool fromReconnect) {
     mouseController_.SetEnabled(false);
 
     if (!isDesktopConnected_) {
+        return;
+    }
+
+    if (kMinimalExplorerDrivenRuntimeForDiagnostics) {
+        Infrastructure::Logger::Get().Info(
+            L"[ExplorerDriven] diagnostic minimal runtime active: skipping mouse hook, icon snapshot, and managed fence restore. "
+            L"fromReconnect=" +
+            std::wstring(fromReconnect ? L"true" : L"false") +
+            L"; fenceCount=" + std::to_wstring(managedFences_.size()));
         return;
     }
 
@@ -1465,6 +1513,8 @@ bool AppController::HandleFenceEditMouse(WPARAM message, const POINT& point) {
 }
 
 void AppController::UpdateOverlayWindow() {
+    UpdateBackgroundWindow();
+
     if (!overlayWindow_.IsInitialized()) {
         return;
     }
@@ -1511,6 +1561,129 @@ void AppController::UpdateOverlayWindow() {
         (activeFenceId_.has_value() ? std::to_wstring(*activeFenceId_) : std::wstring(L"none")));
 }
 
+bool AppController::UpdateBackgroundWindow() {
+    const DisplayDiagnostics display = CollectDisplayDiagnostics();
+    desktopBackgroundRenderer_.SetVirtualDesktopRect(display.virtualDesktopRect);
+
+    std::vector<RECT> backgroundFenceRects;
+    backgroundFenceRects.reserve(managedFences_.size());
+    for (const ManagedFenceState& managedFence : managedFences_) {
+        backgroundFenceRects.push_back(managedFence.record.bounds);
+    }
+    desktopBackgroundRenderer_.SetFenceRects(backgroundFenceRects);
+    bool backgroundApplied = false;
+    if (desktopResolveResult_.listViewWindow != nullptr && IsWindow(desktopResolveResult_.listViewWindow)) {
+        const bool isSameCandidate = backgroundListViewCandidate_ == desktopResolveResult_.listViewWindow;
+        if (!isSameCandidate) {
+            backgroundListViewCandidate_ = desktopResolveResult_.listViewWindow;
+            backgroundListViewStableTicks_ = 0;
+            desktopBackgroundApplyPending_ = true;
+            desktopBackgroundApplyRetryCount_ = 0;
+            desktopBackgroundFallbackNeeded_ = false;
+        } else if (backgroundListViewStableTicks_ < kDesktopBackgroundStableTickThreshold) {
+            ++backgroundListViewStableTicks_;
+        }
+
+        if (!desktopBackgroundFallbackNeeded_ &&
+            desktopBackgroundApplyPending_ &&
+            backgroundListViewStableTicks_ >= kDesktopBackgroundStableTickThreshold) {
+            backgroundApplied = desktopBackgroundRenderer_.ApplyToListView(desktopResolveResult_.listViewWindow);
+            if (backgroundApplied) {
+                desktopBackgroundApplyPending_ = false;
+                desktopBackgroundApplyRetryCount_ = 0;
+                desktopBackgroundFallbackNeeded_ = false;
+            } else {
+                ++desktopBackgroundApplyRetryCount_;
+                if (desktopBackgroundApplyRetryCount_ >= kDesktopBackgroundRetryLimit) {
+                    desktopBackgroundFallbackNeeded_ = true;
+                    desktopBackgroundApplyPending_ = false;
+                    Infrastructure::Logger::Get().Error(
+                        L"[DesktopBackground] switching to fallback path after repeated apply failures.");
+                }
+            }
+        }
+
+        Infrastructure::Logger::Get().Info(
+            L"[DesktopBackground] apply attempt. listView=0x" +
+            std::to_wstring(reinterpret_cast<uintptr_t>(desktopResolveResult_.listViewWindow)) +
+            L"; applied=" + std::wstring(backgroundApplied ? L"true" : L"false") +
+            L"; stableTicks=" + std::to_wstring(backgroundListViewStableTicks_) +
+            L"; pending=" + std::wstring(desktopBackgroundApplyPending_ ? L"true" : L"false") +
+            L"; retry=" + std::to_wstring(desktopBackgroundApplyRetryCount_) +
+            L"; fallbackNeeded=" + std::wstring(desktopBackgroundFallbackNeeded_ ? L"true" : L"false"));
+    } else {
+        desktopBackgroundRenderer_.ClearFromListView(desktopResolveResult_.listViewWindow);
+        backgroundListViewCandidate_ = nullptr;
+        backgroundListViewStableTicks_ = 0;
+        desktopBackgroundApplyPending_ = true;
+        desktopBackgroundApplyRetryCount_ = 0;
+        desktopBackgroundFallbackNeeded_ = false;
+        Infrastructure::Logger::Get().Info(L"[DesktopBackground] apply skipped: listView unavailable in controller.");
+    }
+
+    if (desktopResolveResult_.backgroundAnchorWindow != nullptr &&
+        IsWindow(desktopResolveResult_.backgroundAnchorWindow)) {
+        backgroundWindow_.SetDesktopHostWindow(desktopResolveResult_.backgroundAnchorWindow);
+    } else if (desktopResolveResult_.workerWindow != nullptr && IsWindow(desktopResolveResult_.workerWindow)) {
+        backgroundWindow_.SetDesktopHostWindow(desktopResolveResult_.workerWindow);
+    } else if (desktopResolveResult_.progmanWindow != nullptr &&
+               IsWindow(desktopResolveResult_.progmanWindow)) {
+        backgroundWindow_.SetDesktopHostWindow(desktopResolveResult_.progmanWindow);
+    } else {
+        backgroundWindow_.SetDesktopHostWindow(nullptr);
+    }
+
+    backgroundWindow_.SetVirtualDesktopRect(display.virtualDesktopRect);
+    backgroundWindow_.SetFenceRects(backgroundFenceRects);
+
+    Infrastructure::Logger::Get().Info(
+        L"[Background] UpdateBackgroundWindow fenceCount=" + std::to_wstring(backgroundFenceRects.size()) +
+        L"; anchorStrategy=" + desktopResolveResult_.backgroundAnchorStrategy);
+    ApplyBackgroundFallbackState();
+    return backgroundApplied;
+}
+
+void AppController::ApplyBackgroundFallbackState() {
+    if (!backgroundWindow_.IsInitialized()) {
+        return;
+    }
+
+    if (desktopBackgroundFallbackNeeded_) {
+        backgroundWindow_.Show();
+        Infrastructure::Logger::Get().Info(L"[Background] fallback path active: using local background window.");
+        return;
+    }
+
+    if (desktopBackgroundApplyPending_) {
+        backgroundWindow_.Show();
+        Infrastructure::Logger::Get().Info(L"[Background] probe path active: keeping local background window visible.");
+        return;
+    }
+
+    backgroundWindow_.Hide();
+    Infrastructure::Logger::Get().Info(L"[Background] primary desktop background path active: local background window hidden.");
+}
+
+void AppController::CleanupWindowResources(HWND windowHandle) {
+    if (windowResourcesCleanedUp_) {
+        return;
+    }
+
+    windowResourcesCleanedUp_ = true;
+    Infrastructure::Logger::Get().Info(
+        L"[App] CleanupWindowResources begin. this=" + PointerToString(this) +
+        L"; hwnd=" + HandleToString(windowHandle));
+    if (windowHandle != nullptr && IsWindow(windowHandle)) {
+        KillTimer(windowHandle, desktopHealthTimerId_);
+    }
+    desktopBackgroundRenderer_.Destroy();
+    backgroundWindow_.Destroy();
+    overlayWindow_.Destroy();
+    trayIcon_.Remove();
+    Infrastructure::Logger::Get().Info(
+        L"[App] CleanupWindowResources end. this=" + PointerToString(this));
+}
+
 LRESULT CALLBACK AppController::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     AppController* controller = nullptr;
 
@@ -1518,6 +1691,9 @@ LRESULT CALLBACK AppController::WindowProc(HWND hwnd, UINT message, WPARAM wPara
         const auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
         controller = reinterpret_cast<AppController*>(createStruct->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(controller));
+    } else if (message == WM_NCDESTROY) {
+        controller = reinterpret_cast<AppController*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     } else {
         controller = reinterpret_cast<AppController*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
@@ -1533,6 +1709,8 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
         trayIcon_.SetPinned(isPinned_);
         trayIcon_.SetPaused(isPaused_);
         trayIcon_.RecreateAfterExplorerRestart();
+        UpdateBackgroundWindow();
+        backgroundWindow_.Show();
         UpdateOverlayWindow();
         overlayWindow_.Show();
         ResolveDesktopWindows(false);
@@ -1542,12 +1720,17 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
 
     switch (message) {
         case WM_APP + 100:
+            if (isExiting_) {
+                return 0;
+            }
             ApplySelectionStartedOnUiThread();
             return 0;
         case WM_APP + 101: {
             const auto* selectionRect = reinterpret_cast<RECT*>(lParam);
             if (selectionRect != nullptr) {
-                ApplySelectionUpdatedOnUiThread(*selectionRect);
+                if (!isExiting_) {
+                    ApplySelectionUpdatedOnUiThread(*selectionRect);
+                }
                 delete selectionRect;
             }
             return 0;
@@ -1558,11 +1741,16 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
                 const RECT completedRect = payload->rect;
                 const POINT releasePoint = payload->releasePoint;
                 delete payload;
-                ApplySelectionCompletedOnUiThread(completedRect, releasePoint);
+                if (!isExiting_) {
+                    ApplySelectionCompletedOnUiThread(completedRect, releasePoint);
+                }
             }
             return 0;
         }
         case WM_APP + 103:
+            if (isExiting_) {
+                return 0;
+            }
             ApplySelectionCanceledOnUiThread();
             return 0;
         case WM_COMMAND:
@@ -1577,6 +1765,8 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
                     Infrastructure::Logger::Get().Info(L"Desktop window handle invalid, reconnecting.");
                     ResolveDesktopWindows(false);
                     UpdateWindowTitle();
+                } else if (desktopBackgroundApplyPending_) {
+                    (void)UpdateBackgroundWindow();
                 }
                 return 0;
             }
@@ -1629,16 +1819,20 @@ LRESULT AppController::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPA
                 Infrastructure::Logger::Get().Info(L"Main window hidden to tray.");
                 return 0;
             }
+            Infrastructure::Logger::Get().Info(L"[App] WM_CLOSE exiting -> DestroyWindow.");
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
-            KillTimer(hwnd, desktopHealthTimerId_);
-            overlayWindow_.Destroy();
-            trayIcon_.Remove();
+            Infrastructure::Logger::Get().Info(
+                L"[App] WM_DESTROY begin. this=" + PointerToString(this) +
+                L"; hwnd=" + HandleToString(hwnd));
+            CleanupWindowResources(hwnd);
             if (isExiting_) {
                 Infrastructure::Logger::Get().Info(L"Application is shutting down from tray command.");
             }
             mainWindow_ = nullptr;
+            Infrastructure::Logger::Get().Info(
+                L"[App] WM_DESTROY end. this=" + PointerToString(this));
             PostQuitMessage(0);
             return 0;
         default:
@@ -1651,6 +1845,9 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
         case IDM_TRAY_SETTINGS:
             Infrastructure::Logger::Get().Info(L"Tray command: Settings.");
             ShowMainWindow();
+            if (backgroundWindow_.IsInitialized()) {
+                backgroundWindow_.Show();
+            }
             if (overlayWindow_.IsInitialized()) {
                 overlayWindow_.Show();
             }
@@ -1728,8 +1925,13 @@ void AppController::HandleCommand(HWND hwnd, WORD commandId) {
             isExiting_ = true;
             Infrastructure::Logger::Get().Info(L"Tray command: Exit.");
             const bool restoreNeededAfterExit = !managedFences_.empty();
-            if (!RestoreOriginalDesktopLayout(true)) {
-                Infrastructure::Logger::Get().Error(L"[Exit] restore original desktop layout failed before shutdown.");
+            if (!kSkipExitRestoreForDiagnostics) {
+                if (!RestoreOriginalDesktopLayout(true)) {
+                    Infrastructure::Logger::Get().Error(L"[Exit] restore original desktop layout failed before shutdown.");
+                }
+            } else {
+                Infrastructure::Logger::Get().Info(
+                    L"[Exit] diagnostic mode: skipping RestoreOriginalDesktopLayout before shutdown.");
             }
             PersistCleanShutdownRestoreSession(L"clean_exit", restoreNeededAfterExit);
             DestroyWindow(hwnd);
@@ -1812,6 +2014,8 @@ void AppController::ResolveDesktopWindows(bool fromManualReconnect) {
 
     if (isDesktopConnected_) {
         ApplyExplorerDrivenRuntimeState(fromManualReconnect);
+        desktopBackgroundApplyPending_ = true;
+        (void)UpdateBackgroundWindow();
         UpdateOverlayWindow();
         if (mainWindow_ != nullptr && IsWindow(mainWindow_)) {
             InvalidateRect(mainWindow_, nullptr, TRUE);
@@ -2932,6 +3136,8 @@ void AppController::LogDesktopResolveDiagnostics() const {
     summary += L"; progman=" + HandleToString(desktopResolveResult_.progmanWindow);
     summary += L"; worker=" + HandleToString(desktopResolveResult_.workerWindow);
     summary += L"; workerAfterDefView=" + HandleToString(desktopResolveResult_.workerWindowAfterDefView);
+    summary += L"; backgroundAnchor=" + HandleToString(desktopResolveResult_.backgroundAnchorWindow);
+    summary += L"; backgroundAnchorStrategy=" + desktopResolveResult_.backgroundAnchorStrategy;
     summary += L"; overlayAnchor=" + HandleToString(desktopResolveResult_.overlayAnchorWindow);
     summary += L"; overlayAnchorStrategy=" + desktopResolveResult_.overlayAnchorStrategy;
     summary += L"; defView=" + HandleToString(desktopResolveResult_.shellDefViewWindow);
@@ -2940,6 +3146,7 @@ void AppController::LogDesktopResolveDiagnostics() const {
     summary += L"; progmanClass=" + desktopResolveResult_.progmanClassName;
     summary += L"; workerClass=" + desktopResolveResult_.workerClassName;
     summary += L"; workerAfterDefViewClass=" + desktopResolveResult_.workerAfterDefViewClassName;
+    summary += L"; backgroundAnchorClass=" + desktopResolveResult_.backgroundAnchorClassName;
     summary += L"; overlayAnchorClass=" + desktopResolveResult_.overlayAnchorClassName;
     summary += L"; defViewClass=" + desktopResolveResult_.shellDefViewClassName;
     summary += L"; listViewClass=" + desktopResolveResult_.listViewClassName;
@@ -2992,6 +3199,9 @@ std::wstring AppController::BuildDesktopResolveStatusText() const {
             L" (" + desktopResolveResult_.workerClassName + L")\r\n";
     text += L"WorkerW(AfterDefView): " + HandleToString(desktopResolveResult_.workerWindowAfterDefView) +
             L" (" + desktopResolveResult_.workerAfterDefViewClassName + L")\r\n";
+    text += L"Background Anchor: " + HandleToString(desktopResolveResult_.backgroundAnchorWindow) +
+            L" (" + desktopResolveResult_.backgroundAnchorClassName + L")\r\n";
+    text += L"Background Strategy: " + desktopResolveResult_.backgroundAnchorStrategy + L"\r\n";
     text += L"Overlay Anchor: " + HandleToString(desktopResolveResult_.overlayAnchorWindow) +
             L" (" + desktopResolveResult_.overlayAnchorClassName + L")\r\n";
     text += L"Overlay Strategy: " + desktopResolveResult_.overlayAnchorStrategy + L"\r\n";
